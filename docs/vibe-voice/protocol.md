@@ -184,8 +184,10 @@ in Voice Notes ("allow AI to control recording" off), 10 stop failed.
   HELLO_ACK; on link loss both sides drop them.
 - The message comes from the session's rendered screen, read once on the
   transition (`orca terminal read --screen`, on the Orca watch thread, bounded
-  to 3 s): Claude Code's "※ recap:" paragraph when present, else its last "⏺"
-  reply block that is not a tool call, continuation lines joined; status rows,
+  to 3 s): the last "⏺" reply block that is not a tool call, which is what
+  Orca's macOS notification shows, else Claude Code's "※ recap:" paragraph when
+  the reply has scrolled off screen; continuation lines are joined, table borders
+  dropped, and long text keeps its beginning with a trailing "…"; status rows,
   the prompt box and the status line below it are ignored. Without either, the
   readable end of the list preview, else a fixed Chinese "waiting for your
   reply" text.

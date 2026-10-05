@@ -165,7 +165,8 @@ words. OK opens it (Jumps to the session), UP dismisses it.
   Orca's own notification (also for the session Orca is showing), but not for
   sessions already waiting when the Companion starts. Its message is read once
   from the session's rendered screen (`orca terminal read --screen`): Claude
-  Code's recap, else its last reply. It disappears when the session works
+  Code's last reply (as in Orca's notification), else its recap; long text keeps
+  its beginning. It disappears when the session works
   again or closes, or when you open or dismiss it on the Device.
 - `--screen-message <handle>` prints the message the parser takes from one
   terminal's screen (read-only).

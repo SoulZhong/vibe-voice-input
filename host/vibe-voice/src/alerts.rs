@@ -239,8 +239,8 @@ fn is_rule(line: &str) -> bool {
 }
 
 /// The agent's words from a rendered Claude Code screen
-/// (`orca terminal read --screen`): the "※ recap:" paragraph when present,
-/// else the last "⏺ " reply block that is not a tool call. Status lines, the
+/// (`orca terminal read --screen`): the last "⏺ " reply block that is not a
+/// tool call (what Orca's notification shows), else the "※ recap:" paragraph. Status lines, the
 /// prompt box and the status line rows below it are ignored.
 pub fn screen_message(lines: &[String]) -> Option<String> {
     // Everything from the prompt box down is input and status rows: stop at
@@ -273,25 +273,13 @@ pub fn screen_message(lines: &[String]) -> Option<String> {
             if t.starts_with('⎿') || is_chrome_line(t) {
                 continue;
             }
-            text = join_lines(&text, t);
+            text = join_lines(&text, &strip_table_chars(t));
         }
         text
     };
 
-    // (a) Claude Code's recap of the turn.
-    if let Some(i) = body.iter().rposition(|l| l.trim_start().starts_with('※')) {
-        let first = body[i].trim_start().trim_start_matches('※').trim();
-        let first = first.strip_prefix("recap:").unwrap_or(first).trim();
-        let mut text = block(i, first);
-        if let Some(cut) = text.find("(disable recaps") {
-            text.truncate(cut);
-        }
-        let text = text.trim();
-        if !text.is_empty() {
-            return Some(text.to_owned());
-        }
-    }
-    // (b) The last reply block that is not a tool call ("⏺ Bash(…)").
+    // (a) The last reply block that is not a tool call ("⏺ Bash(…)"): the same
+    // message Orca's macOS notification shows.
     for (i, l) in body.iter().enumerate().rev() {
         let Some(rest) = l.trim_start().strip_prefix('⏺') else {
             continue;
@@ -301,6 +289,19 @@ pub fn screen_message(lines: &[String]) -> Option<String> {
             continue;
         }
         let text = block(i, rest);
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(text.to_owned());
+        }
+    }
+    // (b) Claude Code's recap of the turn, when the reply is off screen.
+    if let Some(i) = body.iter().rposition(|l| l.trim_start().starts_with('※')) {
+        let first = body[i].trim_start().trim_start_matches('※').trim();
+        let first = first.strip_prefix("recap:").unwrap_or(first).trim();
+        let mut text = block(i, first);
+        if let Some(cut) = text.find("(disable recaps") {
+            text.truncate(cut);
+        }
         let text = text.trim();
         if !text.is_empty() {
             return Some(text.to_owned());
@@ -319,23 +320,29 @@ fn is_tool_call(s: &str) -> bool {
     }
 }
 
+/// Table borders ("│ a │ b │") inside a line become single spaces.
+fn strip_table_chars(t: &str) -> String {
+    let replaced: String = t.chars().map(|c| if is_chrome_char(c) { ' ' } else { c }).collect();
+    replaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Box drawing and similar rows inside a block.
 fn is_chrome_line(t: &str) -> bool {
     let chrome = t.chars().filter(|c| is_chrome_char(*c)).count();
     chrome * 2 >= t.chars().count()
 }
 
-/// Keep the end of `s` within `max` bytes, with a leading `…` when cut.
-fn tail_within(s: &str, max: usize) -> String {
+/// Keep the start of `s` within `max` bytes, with a trailing `…` when cut,
+/// like the notification text on the Mac.
+fn head_within(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_owned();
     }
-    let budget = max - '…'.len_utf8();
-    let mut start = s.len() - budget;
-    while !s.is_char_boundary(start) {
-        start += 1;
+    let mut end = max - '…'.len_utf8();
+    while !s.is_char_boundary(end) {
+        end -= 1;
     }
-    format!("…{}", &s[start..])
+    format!("{}…", &s[..end])
 }
 
 /// One Alert as sent to the Device.
@@ -453,7 +460,7 @@ impl AlertTracker {
                     id,
                     handle: s.handle.clone(),
                     label: utf8_head(&label, LABEL_BYTES).to_owned(),
-                    message: tail_within(&message, MESSAGE_BYTES),
+                    message: head_within(&message, MESSAGE_BYTES),
                 };
                 self.pending.insert(s.handle.clone(), alert.clone());
                 events.push(AlertEvent::Raise(alert));
@@ -689,7 +696,7 @@ mod tests {
             panic!()
         };
         assert!(a.label.len() <= LABEL_BYTES && a.message.len() <= MESSAGE_BYTES);
-        assert!(a.message.starts_with('…') && a.message.ends_with("结论"));
+        assert!(a.message.starts_with("结论") && a.message.ends_with('…'));
         assert_eq!(t.take(a.id).map(|x| x.handle), Some("a".into()));
         assert_eq!(t.take(a.id), None);
         // Distinct sessions get distinct ids.
@@ -729,26 +736,31 @@ mod tests {
 ◯ background task";
 
     #[test]
-    fn screen_prefers_recap() {
+    fn screen_prefers_last_reply() {
         assert_eq!(
             screen_message(&screen(SCREEN)).as_deref(),
-            Some("The parser now reads the screen. Next: decide whether to update the docs.")
-        );
-    }
-
-    #[test]
-    fn screen_falls_back_to_last_reply_block() {
-        let no_recap: String = SCREEN
-            .lines()
-            .filter(|l| !l.contains("recap") && !l.contains("update the docs. (disable"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(
-            screen_message(&screen(&no_recap)).as_deref(),
             Some(
                 "I updated the parser and the tests pass. The old path is removed. Should I also update the docs?"
             )
         );
+        // Table borders inside a reply are dropped.
+        let table = "⏺ Results:\n  │ name │ ok │\n  │ a    │ 1  │\n────────────\n❯\n────────────";
+        assert_eq!(
+            screen_message(&screen(table)).as_deref(),
+            Some("Results: name ok a 1")
+        );
+    }
+
+    #[test]
+    fn screen_falls_back_to_recap() {
+        // The reply scrolled off screen: only the recap is left.
+        let no_reply: String = SCREEN
+            .lines()
+            .filter(|l| !l.starts_with("⏺ I updated") && !l.starts_with("  The old path") && !l.starts_with("  Should I"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let got = screen_message(&screen(&no_reply));
+        assert!(got.is_some());
         // Tool-call blocks and their output are skipped.
         let tools = "⏺ Explaining first.\n⏺ Read(src/lib.rs)\n  ⎿  Read 40 lines\n✻ Baked for 3s\n────────────\n❯ \n────────────";
         assert_eq!(
@@ -794,7 +806,7 @@ mod tests {
         let AlertEvent::Raise(a) = &ev[0] else {
             panic!()
         };
-        assert!(a.message.len() <= MESSAGE_BYTES && a.message.starts_with('…'));
+        assert!(a.message.len() <= MESSAGE_BYTES && a.message.ends_with('…'));
         assert!(a.message.len() > 300, "uses the longer budget");
     }
 }
