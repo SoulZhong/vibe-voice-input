@@ -112,6 +112,9 @@ in Voice Notes ("allow AI to control recording" off), 10 stop failed.
 ## Behaviour rules
 
 - An Insert never presses Enter. Only SUBMIT does.
+- Every Segment ends with punctuation so repeated Inserts don't run together:
+  Chinese text gets "。", English text gets ". " (with a trailing space). Utterances
+  split by a long pause are joined the same way.
 - UNDO deletes as many characters (grapheme clusters) as the latest Segment had,
   once, where that Segment went (even if the Target changed since). After UNDO, a successful SUBMIT, or the start of a new Dictation, there is
   nothing to undo until the next Segment.

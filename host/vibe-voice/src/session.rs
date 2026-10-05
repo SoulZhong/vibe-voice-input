@@ -202,7 +202,10 @@ fn join_utterances(a: &str, b: &str) -> String {
     if b.is_empty() {
         return a.to_owned();
     }
-    let space = a.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
+    // A pause ended the first utterance: close it so the two don't run together.
+    let a = end_sentence(a);
+    let a = a.trim_end();
+    let space = a.chars().last().is_some_and(|c| c.is_ascii_punctuation() || c.is_ascii_alphanumeric())
         && b.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
     if space {
         format!("{a} {b}")
@@ -210,6 +213,26 @@ fn join_utterances(a: &str, b: &str) -> String {
         format!("{a}{b}")
     }
 }
+
+/// Characters that already end (or properly pause) a sentence.
+const SENTENCE_END: &str = "。！？.!?…；;：:，,、\"'”’」』）)】]";
+
+/// Make a Segment end with punctuation so consecutive Inserts stay separate
+/// sentences: Chinese text gets "。", English text gets ". " (with a space
+/// so the next Insert doesn't glue onto it).
+fn end_sentence(text: &str) -> String {
+    let t = text.trim_end();
+    let Some(last) = t.chars().last() else {
+        return String::new();
+    };
+    if SENTENCE_END.contains(last) {
+        return if last.is_ascii() { format!("{t} ") } else { t.to_owned() };
+    }
+    // A Chinese sentence that happens to end in an English word still gets "。".
+    let chinese = t.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+    if last.is_ascii() && !chinese { format!("{t}. ") } else { format!("{t}。") }
+}
+
 
 /// Whether `new` starts a different utterance rather than revising `prev`.
 /// Revisions keep a common prefix; a restart after a pause shares almost none
@@ -688,7 +711,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             return;
         };
         let dict = d.id;
-        let text = text.trim().to_owned();
+        let text = end_sentence(text.trim());
         if text.is_empty() {
             log::info!("dictation {dict}: nothing recognized");
             self.send(CompanionFrame::Result {
@@ -1826,7 +1849,7 @@ mod tests {
         );
         assert_eq!(
             c.injector.log,
-            ["insert com.tencent.xinWeChat 把这个函数改成异步然后加测试。"]
+            ["insert com.tencent.xinWeChat 把这个函数改成异步。然后加测试。"]
         );
     }
 
@@ -1855,8 +1878,19 @@ mod tests {
         );
         assert_eq!(
             c.injector.log,
-            ["insert com.tencent.xinWeChat First part.Second part."]
+            ["insert com.tencent.xinWeChat First part. Second part. "]
         );
+    }
+
+    #[test]
+    fn segments_end_with_punctuation() {
+        assert_eq!(end_sentence("把函数改成异步"), "把函数改成异步。");
+        assert_eq!(end_sentence("已经有句号。"), "已经有句号。");
+        assert_eq!(end_sentence("真的吗？"), "真的吗？");
+        assert_eq!(end_sentence("run the tests"), "run the tests. ");
+        assert_eq!(end_sentence("done!"), "done! ");
+        assert_eq!(end_sentence("改成 async"), "改成 async。");
+        assert_eq!(end_sentence("  "), "");
     }
 
     #[test]
@@ -1865,7 +1899,7 @@ mod tests {
         assert!(!restarted_utterance("把这个寒暑", "把这个函数"));
         assert!(restarted_utterance("把这个函数改成异步", "然后"));
         assert!(!restarted_utterance("你好", "再见"));
-        assert_eq!(join_utterances("use", "async"), "use async");
+        assert_eq!(join_utterances("use", "async"), "use. async");
         assert_eq!(join_utterances("改成异步。", "然后"), "改成异步。然后");
     }
 
@@ -1892,7 +1926,7 @@ mod tests {
         );
         assert_eq!(
             c.injector.log,
-            ["insert com.tencent.xinWeChat 把函数改成异步"]
+            ["insert com.tencent.xinWeChat 把函数改成异步。"]
         );
     }
 
@@ -1906,12 +1940,12 @@ mod tests {
             &CompanionFrame::Result {
                 dict: 4,
                 status: Status::Ok,
-                text: "把这个函数改成异步".into()
+                text: "把这个函数改成异步。".into()
             }
         );
         assert_eq!(
             c.injector.log,
-            ["insert com.tencent.xinWeChat 把这个函数改成异步"]
+            ["insert com.tencent.xinWeChat 把这个函数改成异步。"]
         );
         assert_eq!(c.recognizer.started, [4]);
         assert_eq!(c.recognizer.samples, 320);
@@ -2012,7 +2046,7 @@ mod tests {
                 CompanionFrame::Result {
                     dict: 2,
                     status: Status::Ok,
-                    text: "你好".into()
+                    text: "你好。".into()
                 }
             ]
         );
@@ -2189,8 +2223,8 @@ mod tests {
         assert_eq!(
             c.injector.log,
             [
-                format!("insert {WECHAT} 晚上吃什么"),
-                format!("delete {WECHAT} 5"),
+                format!("insert {WECHAT} 晚上吃什么。"),
+                format!("delete {WECHAT} 6"),
                 format!("submit {WECHAT}")
             ]
         );
@@ -2222,7 +2256,7 @@ mod tests {
         c.handle_frame(DeviceFrame::Submit, t0);
         assert_eq!(
             c.injector.log,
-            [format!("insert {WECHAT} 你好"), format!("submit {WECHAT}")]
+            [format!("insert {WECHAT} 你好。"), format!("submit {WECHAT}")]
         );
     }
 
@@ -2244,7 +2278,7 @@ mod tests {
         let out = c.take_outbox();
         assert_eq!(out[0], wechat_state());
         assert!(out.contains(&state(Status::Ok, TargetKind::App, "ChatGPT · window")));
-        assert_eq!(c.injector.log, [format!("insert {CHATGPT} hi")]);
+        assert_eq!(c.injector.log, [format!("insert {CHATGPT} hi. ")]);
     }
 
     #[test]
@@ -2259,7 +2293,7 @@ mod tests {
             &CompanionFrame::Result {
                 dict: 1,
                 status: Status::Ok,
-                text: "运行测试".into()
+                text: "运行测试。".into()
             }
         );
         c.handle_frame(DeviceFrame::Undo, t0);
@@ -2269,9 +2303,9 @@ mod tests {
             c.orca.log,
             [
                 "switch term_a",
-                "text term_a 运行测试",
+                "text term_a 运行测试。",
                 "switch term_a",
-                "bs term_a 4",
+                "bs term_a 5",
                 "switch term_a",
                 "enter term_a"
             ]
@@ -2296,10 +2330,10 @@ mod tests {
             &CompanionFrame::Result {
                 dict: 1,
                 status: Status::Ok,
-                text: "继续".into()
+                text: "继续。".into()
             }
         );
-        assert_eq!(c.orca.log, ["open", "switch term_a", "text term_a 继续"]);
+        assert_eq!(c.orca.log, ["open", "switch term_a", "text term_a 继续。"]);
         // Orca quit again: the stored session labels the Target until the
         // next Submit launches Orca.
         c.take_outbox();
@@ -2381,7 +2415,7 @@ mod tests {
         c.orca.snap.sessions.remove(1);
         let out = dictate(&mut c, 1, "继续", t0 + Duration::from_secs(1));
         assert_eq!(out[0], orca_a_state());
-        assert_eq!(c.orca.log, ["switch term_a", "text term_a 继续"]);
+        assert_eq!(c.orca.log, ["switch term_a", "text term_a 继续。"]);
         assert!(
             matches!(c.target(), Some(StoredTarget::Orca { handle, .. }) if handle == "term_a")
         );
@@ -2430,7 +2464,7 @@ mod tests {
         c.handle_frame(DeviceFrame::Undo, t0);
         assert_eq!(
             c.injector.log.last().unwrap(),
-            &format!("delete {WECHAT} 2")
+            &format!("delete {WECHAT} 3")
         );
         // The app quit: nothing is launched.
         c.injector.frontmost = Some(WECHAT.into());
@@ -2509,7 +2543,7 @@ mod tests {
         assert!(c.take_outbox().is_empty());
         let out = dictate(&mut c, 1, "继续", now + Duration::from_millis(1600));
         assert_eq!(out[0], orca_state("voice-notes · PR"));
-        assert_eq!(c.orca.log.last().unwrap(), "text term_c 继续");
+        assert_eq!(c.orca.log.last().unwrap(), "text term_c 继续。");
         // A stale row: the reply reports the failure.
         c.orca.snap.sessions.retain(|s| s.handle != "term_c");
         c.handle_frame(DeviceFrame::TargetSelect { list: 1, index: 2 }, now);
@@ -2750,7 +2784,7 @@ mod tests {
         );
         assert_eq!(
             c.injector.log.last().unwrap(),
-            &format!("delete {WECHAT} 7")
+            &format!("delete {WECHAT} 8")
         );
         assert_eq!(undo_count("é"), 1);
     }
@@ -3014,9 +3048,9 @@ mod tests {
         assert_eq!(
             c.injector.log,
             [
-                format!("insert {WECHAT} 第一句"),
-                format!("insert {WECHAT} 继续写"),
-                format!("delete {WECHAT} 3")
+                format!("insert {WECHAT} 第一句。"),
+                format!("insert {WECHAT} 继续写。"),
+                format!("delete {WECHAT} 4")
             ]
         );
         assert_eq!(
@@ -3193,7 +3227,7 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(c.injector.log, [format!("insert {WECHAT} 你好")]);
+        assert_eq!(c.injector.log, [format!("insert {WECHAT} 你好。")]);
         // Link loss forgets Alerts; a relink starts tracking afresh.
         c.on_disconnected();
         hello(&mut c, t0);
