@@ -53,9 +53,11 @@ static void connect_ready(void) {
     link_event(VV_LINK_READY, 0);
     assert(act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_HELLO);
     assert(memcmp(&act.frames[0].data[2], "fw-test", 7) == 0);
-    // HELLO is sent once per link (protocol), not repeated by ticks.
-    tick(10000);
+    // HELLO repeats every second until HELLO_ACK (first copy may be lost).
+    tick(500);
     assert(act.frame_count == 0 && app.state == VV_ST_LINKING);
+    tick(1000);
+    assert(act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_HELLO);
     frame(ack, sizeof(ack));
     assert(app.state == VV_ST_IDLE && !app.version_mismatch);
     const uint8_t target[] = { 0xB2, 0, 1, 'W', 'e', 'C', 'h', 'a', 't' };

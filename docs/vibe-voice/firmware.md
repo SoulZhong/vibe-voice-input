@@ -118,7 +118,7 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   Mac's encryption fails and the Device shows the pairing error: remove
   `VibeVoice-XXXX` from the Mac's Bluetooth settings and pair again.
 - Link ready = secure + TX notifications enabled. Only then does the Device send
-  HELLO (once per link); HELLO_ACK moves to Idle. If the Companion turns
+  HELLO, repeating it every second until HELLO_ACK moves to Idle. If the Companion turns
   notifications off and on again on a live link, the Device starts over with a
   new HELLO.
 - Throughput: the Device requests a 15–30 ms connection interval and 251-byte

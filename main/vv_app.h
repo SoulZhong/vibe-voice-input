@@ -30,6 +30,7 @@
 #define VV_DICTATION_LIMIT_MS   (5u * 60u * 1000u)
 #define VV_WAIT_RESULT_MS       20000u
 #define VV_PICKER_TIMEOUT_MS    5000u
+#define VV_HELLO_RETRY_MS       1000u
 #define VV_TOAST_MS             2500u
 #define VV_PENDING_TOAST_MS     5000u
 #define VV_RESULT_OK_MS         6000u
@@ -121,6 +122,7 @@ typedef struct {
     vv_state_t state;
     const char *fw;
     bool link_ready;
+    uint32_t hello_sent_ms;   // last HELLO, repeated until HELLO_ACK
     uint32_t passkey;
     bool version_mismatch;
 

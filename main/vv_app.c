@@ -40,10 +40,13 @@ static void copy_text(char *dst, size_t size, const char *src, size_t len, bool 
     vv_utf8_sanitize_tail(src, len, dst, size, cut);
 }
 
-// HELLO is sent exactly once per link, after TX notifications are enabled.
-static void send_hello(vv_app_t *app, vv_actions_t *out) {
+// HELLO goes out when TX notifications are enabled and repeats every second
+// until HELLO_ACK: a bonded reconnect restores the CCCD before the Companion
+// is listening, so the first copy can be lost.
+static void send_hello(vv_app_t *app, uint32_t now_ms, vv_actions_t *out) {
     vv_frame_t *f = push_frame(out);
     if (f) vv_proto_hello(f, app->fw);
+    app->hello_sent_ms = now_ms;
 }
 
 void vv_app_init(vv_app_t *app, const char *fw) {
@@ -240,7 +243,7 @@ void vv_app_link(vv_app_t *app, vv_link_ev_t ev, uint32_t passkey, uint32_t now_
         if (app->link_ready) break;
         app->link_ready = true;
         set_state(app, VV_ST_LINKING);
-        send_hello(app, out);
+        send_hello(app, now_ms, out);
         break;
     }
 }
@@ -384,6 +387,12 @@ void vv_app_tick(vv_app_t *app, uint32_t now_ms, vv_actions_t *out) {
         if (elapsed_ms >= VV_DICTATION_LIMIT_MS) stop_dictation(app, now_ms, out);
         break;
     }
+    case VV_ST_LINKING:
+        if (app->link_ready &&
+            vv_time_reached(now_ms, app->hello_sent_ms + VV_HELLO_RETRY_MS)) {
+            send_hello(app, now_ms, out);
+        }
+        break;
     case VV_ST_WAITING:
         if (vv_time_reached(now_ms, app->waiting_since_ms + VV_WAIT_RESULT_MS)) {
             app->dict_done = true;

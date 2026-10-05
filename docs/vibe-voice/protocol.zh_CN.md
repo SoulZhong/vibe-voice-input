@@ -26,7 +26,7 @@
 
 | 类型 | 名称 | 负载 | 含义 |
 | --- | --- | --- | --- |
-| `0x01` | HELLO | `ver u8`（=1）、`fw 文本` | TX CCCD 打开后发送一次。 |
+| `0x01` | HELLO | `ver u8`（=1）、`fw 文本` | TX CCCD 打开后发送，并每 1 秒重发直到收到 HELLO_ACK（绑定重连时 CCCD 可能在配套程序开始监听前就已恢复）。 |
 | `0x10` | DICT_START | `dict u8` | 听写开始，`dict` 每次递增（回绕）。 |
 | `0x11` | AUDIO | `dict u8`、`seq u16`、`pred i16`、`index u8`、`adpcm[160]` | 20 ms 音频 = 320 个采样。`pred`/`index` 为本帧**之前**的编码器状态，因此每帧可独立解码；`seq` 跳号表示丢帧。 |
 | `0x12` | DICT_STOP | `dict u8` | 用户结束听写（OK）或达到 5 分钟上限。配套程序完成识别、插入并回复 RESULT。 |

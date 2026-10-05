@@ -33,7 +33,7 @@ byte 1.. payload (type specific)
 
 | Type | Name | Payload | Meaning |
 | --- | --- | --- | --- |
-| `0x01` | HELLO | `ver u8` (=1), `fw text` | Sent once after the TX CCCD is enabled. |
+| `0x01` | HELLO | `ver u8` (=1), `fw text` | Sent when the TX CCCD is enabled, then repeated every 1 s until HELLO_ACK (a bonded reconnect can restore the CCCD before the Companion listens). |
 | `0x10` | DICT_START | `dict u8` | A Dictation began. `dict` increments per Dictation (wraps). |
 | `0x11` | AUDIO | `dict u8`, `seq u16`, `pred i16`, `index u8`, `adpcm[160]` | 20 ms of audio = 320 samples. `pred`/`index` are the encoder state **before** this frame, so every frame decodes on its own; a gap in `seq` means lost frames. |
 | `0x12` | DICT_STOP | `dict u8` | User ended the Dictation (OK) or the 5-minute limit hit. Companion finalizes, Inserts and replies RESULT. |
