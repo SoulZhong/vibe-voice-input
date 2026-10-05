@@ -245,6 +245,10 @@ impl Injector for MacInjector {
         let array = NSArray::from_retained_slice(&[ProtocolObject::from_retained(item)]);
         pb.writeObjects(&array);
         let ours = pb.changeCount();
+        log::info!(
+            "paste: clipboard set (change {ours}), posting Cmd+V, AX trusted={}",
+            accessibility_trusted(false)
+        );
         let result = post_key(KEY_V, CGEventFlags::MaskCommand);
         sleep(RESTORE_DELAY);
         if pb.changeCount() == ours {

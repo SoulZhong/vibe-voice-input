@@ -110,6 +110,11 @@ struct Dictation {
     phase: Phase,
     /// Recognizer could not start or failed: the status to report.
     failure: Option<Status>,
+    /// Utterances Speech already finalized or restarted after a pause.
+    committed: String,
+    /// Latest raw transcription of the current utterance.
+    raw: String,
+    /// `committed` + `raw`: the whole Dictation so far.
     best: String,
     sent_partial: String,
     last_partial_at: Option<Instant>,
@@ -122,6 +127,36 @@ pub struct TargetView {
     pub status: Status,
     pub kind: TargetKind,
     pub label: String,
+}
+
+/// Join two utterances; a space only between ASCII words.
+fn join_utterances(a: &str, b: &str) -> String {
+    let (a, b) = (a.trim_end(), b.trim());
+    if a.is_empty() {
+        return b.to_owned();
+    }
+    if b.is_empty() {
+        return a.to_owned();
+    }
+    let space = a.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
+        && b.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if space { format!("{a} {b}") } else { format!("{a}{b}") }
+}
+
+/// Whether `new` starts a different utterance rather than revising `prev`.
+/// Revisions keep a common prefix; a restart after a pause shares almost none
+/// and is shorter than what came before.
+fn restarted_utterance(prev: &str, new: &str) -> bool {
+    let prev_len = prev.chars().count();
+    if prev_len < 4 {
+        return false;
+    }
+    let common = prev
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    common < 2 && new.chars().count() < prev_len
 }
 
 /// Count of user-perceived characters (Chinese characters count 1 each).
@@ -305,6 +340,8 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             audio: AudioAssembler::new(dict),
             phase: Phase::Recording,
             failure,
+            committed: String::new(),
+            raw: String::new(),
             best: String::new(),
             sent_partial: String::new(),
             last_partial_at: None,
@@ -371,18 +408,44 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         };
         match ev {
             RecogEvent::Partial { text, .. } => {
-                d.best = text;
+                // After a long pause Speech may start a fresh transcription
+                // without finalizing: keep what was said before.
+                if restarted_utterance(&d.raw, &text) {
+                    d.committed = join_utterances(&d.committed, &d.raw);
+                }
+                d.raw = text;
+                d.best = join_utterances(&d.committed, &d.raw);
                 d.partial_pending = d.best != d.sent_partial;
                 self.flush_partial(now);
             }
             RecogEvent::Final { text, .. } => {
-                d.best = text.clone();
-                if matches!(d.phase, Phase::Finalizing { .. }) {
-                    self.complete(text);
+                log::info!(
+                    "dictation {id}: final {} chars (utterance {} chars, committed {} chars)",
+                    text.chars().count(),
+                    d.raw.chars().count(),
+                    d.committed.chars().count()
+                );
+                // Speech sometimes finalizes with an empty transcription after
+                // endAudio; keep the recognized Partial Text instead.
+                let utterance = if text.trim().is_empty() {
+                    std::mem::take(&mut d.raw)
                 } else {
-                    // Apple may finalize early (for example after a long
-                    // pause); keep it as the best text and wait for DICT_STOP.
+                    text
+                };
+                d.committed = join_utterances(&d.committed, &utterance);
+                d.raw.clear();
+                d.best = d.committed.clone();
+                if matches!(d.phase, Phase::Finalizing { .. }) {
+                    let best = d.best.clone();
+                    self.complete(best);
+                } else {
+                    // Apple finalized early (after a long pause): the task is
+                    // over, so keep listening with a new one.
                     d.partial_pending = d.best != d.sent_partial;
+                    log::info!("dictation {id}: early final, restarting recognizer");
+                    if let Err(e) = self.recognizer.start(id) {
+                        log::error!("recognizer restart failed: {e:?}");
+                    }
                     self.flush_partial(now);
                 }
             }
@@ -476,6 +539,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         let dict = d.id;
         let text = text.trim().to_owned();
         if text.is_empty() {
+            log::info!("dictation {dict}: nothing recognized");
             self.send(CompanionFrame::Result {
                 dict,
                 status: Status::Empty,
@@ -486,7 +550,18 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         let status = match self.current_dest() {
             Err(status) => status,
             Ok(dest) => {
+                log::info!(
+                    "dictation {dict}: delivering {} chars to {dest:?} (frontmost {:?})",
+                    text.chars().count(),
+                    self.injector.frontmost_bundle_id()
+                );
                 let r = self.deliver(&dest, &text);
+                if dest == Dest::Follow {
+                    // Show where the text actually went (focus may have moved
+                    // since the Dictation started).
+                    let view = self.current_view();
+                    self.send_state(view);
+                }
                 if r == Status::Ok {
                     // Follow focus: UNDO must hit the app that got the text,
                     // even if focus moves on.
@@ -1188,6 +1263,97 @@ mod tests {
         c.take_outbox()
     }
 
+    fn partial(c: &mut C, dict: u8, text: &str, t: Instant) {
+        c.handle_recog(
+            RecogEvent::Partial {
+                dict,
+                text: text.into(),
+            },
+            t,
+        );
+    }
+
+    #[test]
+    fn pause_restart_keeps_first_sentence() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        partial(&mut c, 1, "把这个函数", t0);
+        partial(&mut c, 1, "把这个函数改成异步", t0);
+        // Long pause: Speech starts over with only the new sentence.
+        partial(&mut c, 1, "然后", t0);
+        partial(&mut c, 1, "然后加测试", t0);
+        c.handle_frame(DeviceFrame::DictStop { dict: 1 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: "然后加测试。".into(),
+            },
+            t0,
+        );
+        assert_eq!(c.injector.log, ["insert None 把这个函数改成异步然后加测试。"]);
+    }
+
+    #[test]
+    fn early_final_restarts_and_accumulates() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        partial(&mut c, 1, "first part", t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: "First part.".into(),
+            },
+            t0,
+        );
+        assert_eq!(c.recognizer.started, [1, 1], "restarted after early final");
+        partial(&mut c, 1, "second", t0);
+        c.handle_frame(DeviceFrame::DictStop { dict: 1 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: "Second part.".into(),
+            },
+            t0,
+        );
+        assert_eq!(c.injector.log, ["insert None First part.Second part."]);
+    }
+
+    #[test]
+    fn revisions_are_not_restarts() {
+        assert!(!restarted_utterance("把这个函数改成", "把这个函数改成异步"));
+        assert!(!restarted_utterance("把这个寒暑", "把这个函数"));
+        assert!(restarted_utterance("把这个函数改成异步", "然后"));
+        assert!(!restarted_utterance("你好", "再见"));
+        assert_eq!(join_utterances("use", "async"), "use async");
+        assert_eq!(join_utterances("改成异步。", "然后"), "改成异步。然后");
+    }
+
+    #[test]
+    fn empty_final_falls_back_to_partial() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        c.handle_frame(audio(1, 0), t0);
+        c.handle_recog(
+            RecogEvent::Partial {
+                dict: 1,
+                text: "把函数改成异步".into(),
+            },
+            t0,
+        );
+        c.handle_frame(DeviceFrame::DictStop { dict: 1 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: String::new(),
+            },
+            t0,
+        );
+        assert_eq!(c.injector.log, ["insert None 把函数改成异步"]);
+    }
+
     #[test]
     fn hello_gets_ack_then_target_state() {
         let mut c = companion();
@@ -1403,11 +1569,18 @@ mod tests {
         c.poll(t0 + FINAL_TIMEOUT);
         assert_eq!(
             c.take_outbox(),
-            [CompanionFrame::Result {
-                dict: 2,
-                status: Status::Ok,
-                text: "你好".into()
-            }]
+            [
+                CompanionFrame::TargetState {
+                    status: Status::Ok,
+                    kind: TargetKind::FollowFocus,
+                    label: "跟随当前焦点 · Ghostty".into()
+                },
+                CompanionFrame::Result {
+                    dict: 2,
+                    status: Status::Ok,
+                    text: "你好".into()
+                }
+            ]
         );
         assert_eq!(c.recognizer.cancelled, 1);
         // A late final for a finished dictation is ignored.
