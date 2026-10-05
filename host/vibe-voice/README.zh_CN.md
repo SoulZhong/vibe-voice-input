@@ -37,8 +37,8 @@ scripts/bundle.sh                # release 构建 -> target/bundle/VibeVoice.app
 | 辅助功能 | 激活应用、读取窗口标题、发送 Cmd+V / 回车 / 删除 | 隐私与安全性 > 辅助功能 |
 
 不需要麦克风权限：音频来自 Device。缺少权限会以 STATUS 码告知 Device（1 = 语音识别，
-2 = 辅助功能）。ad-hoc 签名每次重新构建都会变化，重建后请在“辅助功能”里移除并重新添加
-Vibe Voice。
+2 = 辅助功能）。ad-hoc 签名每次重新构建都会变化，重建后请运行 `tccutil reset Accessibility cn.folotoy.vibevoice`
+再重新授权；或打包时设置 `VV_SIGN_IDENTITY="<钥匙串中的签名身份>"`，授权即可在重建后保留。
 
 请通过 `open` 或访达启动，不要在终端里直接执行二进制：macOS 会向*启动它的应用*（你的
 终端）索取语音识别用途说明，终端没有该说明时进程会被系统终止。因此在应用包之外，程序

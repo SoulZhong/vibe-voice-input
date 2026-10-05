@@ -43,7 +43,9 @@ asks for each permission once:
 No microphone permission is needed: audio comes from the Device. Missing
 permissions are reported to the Device as STATUS codes (1 = speech,
 2 = Accessibility). The ad-hoc signature changes on every rebuild, so after
-rebuilding remove and re-add Vibe Voice under Accessibility.
+rebuilding run `tccutil reset Accessibility cn.folotoy.vibevoice` and grant it
+again, or bundle with `VV_SIGN_IDENTITY="<keychain signing identity>"` so the
+grant survives rebuilds.
 
 Run the app through `open` or Finder, not by executing the binary from a
 terminal: macOS asks the *launching* app (your terminal) for the Speech usage

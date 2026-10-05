@@ -954,6 +954,21 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         (StatusCode::Clear, "")
     }
 
+    /// Re-check permissions outside a Dictation; when the health code changed
+    /// (e.g. Accessibility was just granted) resend STATUS and TARGET_STATE.
+    pub fn refresh_health(&mut self) {
+        if self.dictation.is_some() {
+            return;
+        }
+        let (code, _) = self.health_code();
+        if self.last_status == Some(code) {
+            return;
+        }
+        let view = self.current_view();
+        self.send_state(view);
+        self.report_health();
+    }
+
     /// Send STATUS if it changed since last sent.
     pub fn report_health(&mut self) {
         let (code, text) = self.health_code();
@@ -1201,6 +1216,39 @@ mod tests {
                 text: String::new()
             }
         );
+    }
+
+    #[test]
+    fn granting_accessibility_clears_status_on_refresh() {
+        let mut c = companion();
+        c.injector.trusted = false;
+        c.handle_frame(
+            DeviceFrame::Hello {
+                ver: 1,
+                fw: String::new(),
+            },
+            Instant::now(),
+        );
+        c.take_outbox();
+        c.refresh_health();
+        assert!(c.take_outbox().is_empty(), "unchanged health stays quiet");
+        c.injector.trusted = true;
+        c.refresh_health();
+        let out = c.take_outbox();
+        assert!(matches!(
+            out[0],
+            CompanionFrame::TargetState {
+                status: Status::Ok,
+                ..
+            }
+        ));
+        assert!(matches!(
+            out[1],
+            CompanionFrame::Status {
+                code: StatusCode::Clear,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -142,6 +142,8 @@ fn run_companion() {
     ui::run(mtm);
 }
 
+const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
+
 fn core_loop(
     rx: mpsc::Receiver<CoreEvent>,
     self_tx: mpsc::Sender<CoreEvent>,
@@ -167,7 +169,12 @@ fn core_loop(
     );
     let mut connected = false;
     let mut deadline: Option<Instant> = None;
+    let mut next_health = Instant::now() + HEALTH_INTERVAL;
     loop {
+        // Permissions can be granted while running; poll them while linked.
+        if connected {
+            deadline = Some(deadline.map_or(next_health, |d| d.min(next_health)));
+        }
         let ev = match deadline {
             Some(d) => match rx.recv_timeout(d.saturating_duration_since(Instant::now())) {
                 Ok(ev) => Some(ev),
@@ -211,6 +218,10 @@ fn core_loop(
             },
             Some(CoreEvent::Recog(e)) => c.handle_recog(e, now),
             None => {}
+        }
+        if connected && now >= next_health {
+            next_health = now + HEALTH_INTERVAL;
+            c.refresh_health();
         }
         deadline = c.poll(Instant::now());
         for f in c.take_outbox() {

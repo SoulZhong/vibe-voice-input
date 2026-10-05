@@ -22,7 +22,9 @@ plutil -lint "${app}/Contents/Info.plist" >/dev/null
 
 # Ad-hoc signature: enough for local use. macOS ties Accessibility and other
 # permissions to the signature, so re-grant them after rebuilding.
-codesign --force --sign - --identifier cn.folotoy.vibevoice "${app}"
+# Ad-hoc signatures change on every build, so macOS forgets the Accessibility
+# grant. Set VV_SIGN_IDENTITY to a keychain signing identity to keep it.
+codesign --force --sign "${VV_SIGN_IDENTITY:--}" --identifier cn.folotoy.vibevoice "${app}"
 codesign --verify --strict "${app}"
 
 echo "${app}"
