@@ -28,7 +28,7 @@ description: 验证并打包 FoloToy AI Passport 固件，交付已校验的合�
 
 ## 确定准确的交付产物
 
-门禁保留 `build/FoloToy-AI-Passport-full.bin`，以及按内容哈希归档的
+门禁保留 `build/vibe-voice-input-full.bin`，以及按内容哈希归档的
 `build/firmware/<full-bin-sha256>/`。交接前运行：
 
 ```text

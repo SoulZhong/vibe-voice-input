@@ -428,7 +428,7 @@ not installed. The firmware gate is the preferred build path. It uses an
 isolated temporary build and produces the verified `0x0` image at:
 
 ```text
-build/FoloToy-AI-Passport-full.bin
+build/vibe-voice-input-full.bin
 ```
 
 For build-only agents with Docker already authorized, the official Espressif
@@ -473,11 +473,11 @@ Prefer flashing the verified merged image from offset `0x0`:
 
 ```bash
 python -m esptool --chip esp32c3 -p <port> -b 460800 \
-    write-flash 0x0 build/FoloToy-AI-Passport-full.bin
+    write-flash 0x0 build/vibe-voice-input-full.bin
 idf.py -p <port> monitor
 ```
 
-The ordinary `build/FoloToy-AI-Passport.bin` is application-only and belongs at
+The ordinary `build/vibe-voice-input.bin` is application-only and belongs at
 `0x10000`; it must not be written to `0x0`. Use `idf.py flash` only for an
 intentional incremental development flash, not as the default delivery or
 acceptance path.

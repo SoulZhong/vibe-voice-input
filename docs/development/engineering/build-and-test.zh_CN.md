@@ -13,7 +13,7 @@
 > 导出或另行保存。详见[烧录与已存数据](firmware-layout.zh_CN.md#烧录与已存数据)。
 
 > 固件编译优先运行 `./tools/validate.sh --firmware`。空白设备初始化或有意完整
-> 刷新时，把验证通过的 `build/FoloToy-AI-Passport-full.bin` 从 `0x0` 写入；
+> 刷新时，把验证通过的 `build/vibe-voice-input-full.bin` 从 `0x0` 写入；
 > 合并镜像可能重置 NVS，需要保留已有 NVS 状态时使用分段 `idf.py flash`。
 > `idf.py build` 和
 > `idf.py flash` 只作为增量开发命令，不作为默认交付方式。
@@ -78,7 +78,7 @@ Microsoft Defender 可使用其
 
 仓库提交 `dependencies.lock` 以固定 ESP-IDF Managed Components 的解析结果。修改 `idf_component.yml` 后必须使用 ESP-IDF 5.5.3 重新生成锁文件、review 版本变化并与 manifest 一起提交；普通构建不应产生未提交的锁文件差异。
 
-固件门禁使用全新的临时构建目录，并从仓库 `sdkconfig.defaults` 生成隔离的 `sdkconfig`。它不会读取或覆盖开发者根目录的 `sdkconfig`。清理临时构建前，先归档已验证固件及匹配的调试产物，再把已验证合并镜像复制到 `build/FoloToy-AI-Passport-full.bin`。门禁同时验证[当前配置的固件布局](firmware-layout.zh_CN.md)：从 `flash_args` 读取镜像偏移，检查分区表 MD5、边界和不重叠，并确认应用从所配置的 app 分区起点开始且未超出分区。允许用户自定义分区布局。
+固件门禁使用全新的临时构建目录，并从仓库 `sdkconfig.defaults` 生成隔离的 `sdkconfig`。它不会读取或覆盖开发者根目录的 `sdkconfig`。清理临时构建前，先归档已验证固件及匹配的调试产物，再把已验证合并镜像复制到 `build/vibe-voice-input-full.bin`。门禁同时验证[当前配置的固件布局](firmware-layout.zh_CN.md)：从 `flash_args` 读取镜像偏移，检查分区表 MD5、边界和不重叠，并确认应用从所配置的 app 分区起点开始且未超出分区。允许用户自定义分区布局。
 
 ### 保留匹配的崩溃调试产物
 
@@ -110,7 +110,7 @@ python3 tools/archive_firmware.py verify <archive-directory>
 匹配镜像，应在审核内容后另行保留。把 `flash_args` 当作数据，不作为 shell
 脚本执行。
 
-验证失败可能仍保留旧 `build/FoloToy-AI-Passport-full.bin` 和历史归档，
+验证失败可能仍保留旧 `build/vibe-voice-input-full.bin` 和历史归档，
 不能将它们当成本轮失败构建的新产物。交接时给出实际成功归档路径和完整
 镜像哈希；哈希一致不代表硬件通过验收，也不能证明发布者可信。
 
@@ -142,5 +142,5 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 
 涉及物理外设的改动必须在真机运行硬件指南验收清单，并把“编译通过”与“硬件验证通过”分开记录。
 
-社区只能上传验证通过的 `build/FoloToy-AI-Passport-full.bin`，不得上传应用单镜像
-`build/FoloToy-AI-Passport.bin`，后者不包含完整且经校验的固件布局。
+社区只能上传验证通过的 `build/vibe-voice-input-full.bin`，不得上传应用单镜像
+`build/vibe-voice-input.bin`，后者不包含完整且经校验的固件布局。

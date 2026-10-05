@@ -18,7 +18,7 @@
   <a href="/docs/README.zh_CN.md"><img src="https://img.shields.io/badge/Open-firmware-14b8a6?style=flat-square" alt="开放固件"></a>
   <a href="/docs/README.zh_CN.md"><img src="https://img.shields.io/badge/Wearable-AI-2563eb?style=flat-square" alt="可穿戴 AI"></a>
   <a href="/docs/development/ai-guide.zh_CN.md"><img src="https://img.shields.io/badge/Built-for_makers-f97316?style=flat-square" alt="为创作者而造"></a>
-  <a href="/LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748b?style=flat-square" alt="MIT 许可证"></a>
+  <a href="/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-64748b?style=flat-square" alt="AGPL-3.0 许可证"></a>
 </p>
 
 <p align="center">
@@ -211,6 +211,6 @@ LICENSE                  仓库许可证
 
 ---
 
-[参与贡献](../.github/CONTRIBUTING.zh_CN.md) · [获取帮助](../.github/SUPPORT.zh_CN.md) · [行为准则](../.github/CODE_OF_CONDUCT.zh_CN.md) · [安全说明](../.github/SECURITY.zh_CN.md) · [MIT 许可证](../LICENSE)
+[参与贡献](../.github/CONTRIBUTING.zh_CN.md) · [获取帮助](../.github/SUPPORT.zh_CN.md) · [行为准则](../.github/CODE_OF_CONDUCT.zh_CN.md) · [安全说明](../.github/SECURITY.zh_CN.md) · [AGPL-3.0 许可证](../LICENSE)
 
 AI 助手请从 [`AGENTS.md`](../AGENTS.md) 开始，再按任务路由读取相关文档。

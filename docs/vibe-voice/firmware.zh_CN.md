@@ -165,7 +165,7 @@ Voice Notes，听写继续。两次按下间隔超过该窗口则算两次单击
 
 ```bash
 ./tools/validate.sh --static    # 主机测试：vv_adpcm（黄金向量）、vv_proto/vv_text、vv_app、字库覆盖
-./tools/validate.sh --firmware  # ESP-IDF 构建 + 合并镜像 build/FoloToy-AI-Passport-full.bin
+./tools/validate.sh --firmware  # ESP-IDF 构建 + 合并镜像 build/vibe-voice-input-full.bin
 ```
 
 ## 上机验收清单

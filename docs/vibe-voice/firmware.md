@@ -206,7 +206,7 @@ after the UI is built and on link ready.
 
 ```bash
 ./tools/validate.sh --static    # host tests: vv_adpcm (golden vector), vv_proto/vv_text, vv_app, font coverage
-./tools/validate.sh --firmware  # ESP-IDF build + merged image build/FoloToy-AI-Passport-full.bin
+./tools/validate.sh --firmware  # ESP-IDF build + merged image build/vibe-voice-input-full.bin
 ```
 
 ## On-device acceptance checklist

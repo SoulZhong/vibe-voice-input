@@ -373,7 +373,7 @@ grep -E 'CONFIG_IDF_TARGET|CONFIG_ESPTOOLPY_FLASHSIZE|CONFIG_ESP_CONSOLE_USB_SER
 编译方式，它使用隔离的临时构建，并生成经过验证的 `0x0` 镜像：
 
 ```text
-build/FoloToy-AI-Passport-full.bin
+build/vibe-voice-input-full.bin
 ```
 
 对于已经获得 Docker 使用授权、只需编译的 agent，乐鑫官方镜像可以替代主机安装：
@@ -409,11 +409,11 @@ sudo usermod -aG dialout "${USER}"
 
 ```bash
 python -m esptool --chip esp32c3 -p <port> -b 460800 \
-    write-flash 0x0 build/FoloToy-AI-Passport-full.bin
+    write-flash 0x0 build/vibe-voice-input-full.bin
 idf.py -p <port> monitor
 ```
 
-普通的 `build/FoloToy-AI-Passport.bin` 只是 app，只能位于 `0x10000`，不得烧到
+普通的 `build/vibe-voice-input.bin` 只是 app，只能位于 `0x10000`，不得烧到
 `0x0`。`idf.py flash` 只用于明确需要的增量开发烧录，不作为默认交付或验收方式。
 
 ## 故障处理

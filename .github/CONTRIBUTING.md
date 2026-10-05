@@ -84,8 +84,10 @@ scope and compatibility.
 
 ## Licensing of contributions
 
-This repository is licensed under [MIT](/LICENSE). By contributing, you agree that
-your contribution is submitted under the MIT license terms of the repository.
+This repository is licensed under [AGPL-3.0-or-later](/LICENSE). By contributing,
+you agree that your contribution is licensed under those terms. Code inherited from
+the upstream FoloToy AI Passport project remains available under its original
+[MIT license](/LICENSES/MIT-FoloToy.txt).
 
 ## Security issues
 

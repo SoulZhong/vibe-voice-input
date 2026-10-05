@@ -33,7 +33,7 @@ from that checkout; never infer a developer-specific IDF path.
 
 ## Identify the exact deliverable
 
-The gate preserves `build/FoloToy-AI-Passport-full.bin` and a content-addressed
+The gate preserves `build/vibe-voice-input-full.bin` and a content-addressed
 bundle under `build/firmware/<full-bin-sha256>/`. Verify the bundle before
 handoff with:
 

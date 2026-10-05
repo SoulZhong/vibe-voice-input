@@ -15,7 +15,7 @@ the [environment bootstrap](environment-setup.md) first.
 > See [flashing and stored data](firmware-layout.md#flashing-and-stored-data).
 
 > Prefer `./tools/validate.sh --firmware` for firmware builds. Flash its
-> verified `build/FoloToy-AI-Passport-full.bin` at offset `0x0` for a blank
+> verified `build/vibe-voice-input-full.bin` at offset `0x0` for a blank
 > device or an intentional complete refresh. The merged image may reset NVS;
 > use segmented `idf.py flash` when existing NVS state must be preserved. Treat
 > `idf.py build` and `idf.py flash` as incremental development commands, not the
@@ -87,7 +87,7 @@ or project, and do not disable real-time protection.
 
 The tracked `dependencies.lock` pins Managed Component resolution. After changing an `idf_component.yml`, regenerate the lock with ESP-IDF 5.5.3, review version changes, and commit it with the manifest. An ordinary build must not leave an unexplained lock-file diff.
 
-Firmware validation uses a fresh temporary build directory and an isolated `sdkconfig` generated from the tracked defaults. It does not consume or overwrite a developer's root `sdkconfig`. Before cleaning the temporary build, it archives the verified firmware and matching debug artifacts, then copies the verified merged image to `build/FoloToy-AI-Passport-full.bin`. The gate also validates the [configured firmware layout](firmware-layout.md): image offsets from `flash_args`, partition-table MD5, bounds and non-overlap, and an application that starts in and fits its configured app partition. User-defined partition layouts are allowed.
+Firmware validation uses a fresh temporary build directory and an isolated `sdkconfig` generated from the tracked defaults. It does not consume or overwrite a developer's root `sdkconfig`. Before cleaning the temporary build, it archives the verified firmware and matching debug artifacts, then copies the verified merged image to `build/vibe-voice-input-full.bin`. The gate also validates the [configured firmware layout](firmware-layout.md): image offsets from `flash_args`, partition-table MD5, bounds and non-overlap, and an application that starts in and fits its configured app partition. User-defined partition layouts are allowed.
 
 ### Retain matching crash-debugging artifacts
 
@@ -125,7 +125,7 @@ package or a sanitization guarantee. Preserve any additional matching images
 needed for a user-specific segmented workflow separately, after reviewing their
 content. Treat `flash_args` as data, not a shell script.
 
-A failed validation may leave a previous `build/FoloToy-AI-Passport-full.bin`
+A failed validation may leave a previous `build/vibe-voice-input-full.bin`
 and older bundles intact. Never present those as the failed run's new output.
 Hand off the exact successful bundle path and full-image hash. Hash consistency
 is not proof of hardware behavior or a trusted publisher.
@@ -166,6 +166,6 @@ CI calls the same script. Fix the shared script or environment if local and CI b
 
 Hardware-affecting changes must also run the applicable on-device checklist in the hardware guide. Report compilation separately from physical-device validation.
 
-Never upload the app-only `build/FoloToy-AI-Passport.bin` to the community. Only
-the validated `build/FoloToy-AI-Passport-full.bin` contains the complete checked
+Never upload the app-only `build/vibe-voice-input.bin` to the community. Only
+the validated `build/vibe-voice-input-full.bin` contains the complete checked
 firmware layout.

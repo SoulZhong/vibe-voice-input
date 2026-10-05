@@ -70,7 +70,7 @@ cc -std=c11 -Wall -Wextra -Werror -Imain \
 
 ## 贡献的许可
 
-本仓库使用 [MIT](/LICENSE) 许可证。提交贡献即表示你同意按本仓库的 MIT 条款并入你的贡献。
+本仓库使用 [AGPL-3.0-or-later](/LICENSE) 许可证。提交贡献即表示你同意按该许可证条款并入你的贡献。继承自上游 FoloToy AI Passport 项目的代码仍可按其原始 [MIT 许可证](/LICENSES/MIT-FoloToy.txt) 使用。
 
 ## 安全漏洞
 

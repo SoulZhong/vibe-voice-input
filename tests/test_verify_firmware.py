@@ -91,7 +91,7 @@ class FirmwareLayoutTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             build_dir = Path(directory)
-            with (build_dir / "FoloToy-AI-Passport.bin").open("wb") as app_file:
+            with (build_dir / "vibe-voice-input.bin").open("wb") as app_file:
                 app_file.write(b"\xe9")
                 app_file.truncate(app_size)
             VERIFY.verify_firmware_layout(merged, build_dir, table_offset, app_offset)
@@ -158,10 +158,10 @@ class FlashArgsTest(unittest.TestCase):
         offsets = VERIFY.parse_flash_args(
             "--flash_mode dio --flash_size 8MB\n"
             "0x0 bootloader/bootloader.bin\n"
-            "0x18000 FoloToy-AI-Passport.bin\n"
+            "0x18000 vibe-voice-input.bin\n"
             "0x9000 partition_table/partition-table.bin\n"
         )
-        self.assertEqual(offsets["FoloToy-AI-Passport.bin"], 0x18000)
+        self.assertEqual(offsets["vibe-voice-input.bin"], 0x18000)
         self.assertEqual(offsets["partition_table/partition-table.bin"], 0x9000)
 
     def test_rejects_incomplete_image_entry(self) -> None:
@@ -192,7 +192,7 @@ class FirmwareCliTest(unittest.TestCase):
         images = (
             ("bootloader/bootloader.bin", 0, b"\xe9boot"),
             ("partition_table/partition-table.bin", DEFAULT_TABLE_OFFSET, sample_table(entries)),
-            ("FoloToy-AI-Passport.bin", app_offset, b"\xe9app"),
+            ("vibe-voice-input.bin", app_offset, b"\xe9app"),
         ) + extras
         merged = bytearray()
         flash_args = ["--flash_mode dio --flash_size 8MB"]
@@ -207,7 +207,7 @@ class FirmwareCliTest(unittest.TestCase):
                 end = min(offset + len(data), VERIFY.FLASH_SIZE)
                 merged.extend(b"\xff" * max(0, end - len(merged)))
                 merged[offset:end] = data[:end - offset]
-        (self.build_dir / "FoloToy-AI-Passport-full.bin").write_bytes(merged)
+        (self.build_dir / "vibe-voice-input-full.bin").write_bytes(merged)
         (self.build_dir / "flash_args").write_text("\n".join(flash_args) + "\n")
 
     def run_verifier(self, error: str | None = None) -> None:
@@ -277,13 +277,13 @@ class FirmwareCliTest(unittest.TestCase):
 
     def test_rejects_resource_missing_from_merged_image(self) -> None:
         self.create_build((("assets.bin", 0x20000, b"resource"),), self.CUSTOM_ENTRIES)
-        with (self.build_dir / "FoloToy-AI-Passport-full.bin").open("r+b") as merged:
+        with (self.build_dir / "vibe-voice-input-full.bin").open("r+b") as merged:
             merged.truncate(0x20000)
         self.run_verifier("assets.bin differs")
 
     def test_rejects_resource_byte_mismatch(self) -> None:
         self.create_build((("assets.bin", 0x20000, b"resource"),), self.CUSTOM_ENTRIES)
-        with (self.build_dir / "FoloToy-AI-Passport-full.bin").open("r+b") as merged:
+        with (self.build_dir / "vibe-voice-input-full.bin").open("r+b") as merged:
             merged.seek(0x20000)
             merged.write(b"X")
         self.run_verifier("assets.bin differs")

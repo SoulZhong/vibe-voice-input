@@ -14,7 +14,7 @@ from pathlib import Path
 REQUIRED_IMAGES = (
     "bootloader/bootloader.bin",
     "partition_table/partition-table.bin",
-    "FoloToy-AI-Passport.bin",
+    "vibe-voice-input.bin",
 )
 
 FLASH_SIZE = 8 * 1024 * 1024
@@ -155,7 +155,7 @@ def verify_firmware_layout(
             f"application offset 0x{app_offset:x} must match exactly one app partition"
         )
     app_partition = matching_apps[0]
-    app_path = build_dir / "FoloToy-AI-Passport.bin"
+    app_path = build_dir / "vibe-voice-input.bin"
     app_size = app_path.stat().st_size
     if app_size > app_partition.size:
         raise ValueError(
@@ -188,7 +188,7 @@ def verify_extra_image_partitions(
 
 def main() -> int:
     build_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "build").resolve()
-    merged_path = build_dir / "FoloToy-AI-Passport-full.bin"
+    merged_path = build_dir / "vibe-voice-input-full.bin"
     flash_args_path = build_dir / "flash_args"
 
     if not merged_path.is_file() or not flash_args_path.is_file():
@@ -213,7 +213,7 @@ def main() -> int:
             merged,
             build_dir,
             image_offsets["partition_table/partition-table.bin"],
-            image_offsets["FoloToy-AI-Passport.bin"],
+            image_offsets["vibe-voice-input.bin"],
         )
         verify_extra_image_partitions(image_offsets, image_sizes, partitions)
     except (OSError, UnicodeDecodeError, ValueError) as error:

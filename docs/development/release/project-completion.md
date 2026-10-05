@@ -119,7 +119,7 @@ was not collected, fetch the values through the relevant action skill.
 
 When a delivery action (A or B) produced a merged full build, verify it on real
 hardware before treating the project as complete. Download the release's merged
-full firmware (`FoloToy-AI-Passport-full.bin`, the flashable complete build from
+full firmware (`vibe-voice-input-full.bin`, the flashable complete build from
 `0x0`), flash it to a device, and confirm it runs normally. Do not treat a
 successful build or upload as hardware validation: this step proves the artifact
 the release actually points to boots and works on real hardware. The artifact

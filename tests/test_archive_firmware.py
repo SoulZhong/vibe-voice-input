@@ -28,10 +28,10 @@ class FirmwareArchiveTest(unittest.TestCase):
         self.build = self.root / "build-input"
         self.output = self.root / "archives"
         self.build.mkdir()
-        self.app_name = "FoloToy-AI-Passport.bin"
-        self.elf_name = "FoloToy-AI-Passport.elf"
-        self.map_name = "FoloToy-AI-Passport.map"
-        self.full_name = "FoloToy-AI-Passport-full.bin"
+        self.app_name = "vibe-voice-input.bin"
+        self.elf_name = "vibe-voice-input.elf"
+        self.map_name = "vibe-voice-input.map"
+        self.full_name = "vibe-voice-input-full.bin"
         self.offsets = {
             "bootloader/bootloader.bin": 0,
             "partition_table/partition-table.bin": 0x8000,
@@ -50,7 +50,7 @@ class FirmwareArchiveTest(unittest.TestCase):
         struct.pack_into("<II", app, 24, 0x3C000020, 256)
         struct.pack_into("<I", app, 32, 0xABCD5432)
         app[48:80] = b"fixture-version".ljust(32, b"\x00")
-        app[80:112] = b"FoloToy-AI-Passport".ljust(32, b"\x00")
+        app[80:112] = b"vibe-voice-input".ljust(32, b"\x00")
         app[144:176] = b"v5.5.3".ljust(32, b"\x00")
         app[176:208] = hashlib.sha256(elf).digest()
         self.write(self.app_name, bytes(app))
@@ -69,7 +69,7 @@ class FirmwareArchiveTest(unittest.TestCase):
             b"--flash_mode dio --flash_freq 80m --flash_size 8MB\n"
             b"0x0 bootloader/bootloader.bin\n"
             b"0x8000 partition_table/partition-table.bin\n"
-            b"0x10000 FoloToy-AI-Passport.bin\n",
+            b"0x10000 vibe-voice-input.bin\n",
         )
         self.merge()
         quiet = contextlib.redirect_stdout(io.StringIO())
@@ -117,7 +117,7 @@ class FirmwareArchiveTest(unittest.TestCase):
         self.assertEqual(manifest["image_offsets"], self.offsets)
         self.assertEqual(manifest["app_descriptor"]["version"], "fixture-version")
         self.assertEqual(manifest["app_descriptor"]["idf_version"], "v5.5.3")
-        self.assertEqual(manifest["app_descriptor"]["project_name"], "FoloToy-AI-Passport")
+        self.assertEqual(manifest["app_descriptor"]["project_name"], "vibe-voice-input")
         self.assertEqual(manifest["app_elf_sha256"], manifest["app_descriptor"]["embedded_elf_sha256"])
         self.assertEqual(set(manifest["files"]), set(ARCHIVE.ARTIFACTS))
         for name in ARCHIVE.ARTIFACTS:
@@ -243,7 +243,7 @@ class FirmwareArchiveTest(unittest.TestCase):
         for line in (
             "0x1000 ../outside.bin", "0x1000 /outside.bin", "0x1000 C:/outside.bin",
             "0x1000 a/../outside.bin", "0x1000 './outside.bin'", "0x1000 'a\\b.bin'",
-            "0x1000 FoloToy-AI-Passport.bin", "-1 outside.bin", "0x800000 outside.bin",
+            "0x1000 vibe-voice-input.bin", "-1 outside.bin", "0x800000 outside.bin",
             f"$(touch {marker})", f"0x1000 '$(touch {marker}).bin'", "--flash_size 4MB",
             "--unknown value", "--flash_freq '80m;exit'", "0x1000 x.bin; exit 1",
         ):

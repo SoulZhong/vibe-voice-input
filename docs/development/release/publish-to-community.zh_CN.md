@@ -31,7 +31,7 @@ skill 的 `SKILL.md` 定义了精确流程：检查项目、准备中英文标�
 
 ## 你需要提供给助手的东西
 
-- **固件**：固定使用单个合并镜像 `build/FoloToy-AI-Passport-full.bin`，
+- **固件**：固定使用单个合并镜像 `build/vibe-voice-input-full.bin`，
   且必须通过 `./tools/validate.sh --firmware` 与[当前配置的固件布局](../engineering/firmware-layout.zh_CN.md)。
   不得用 `idf.py build` 生成的应用单镜像替代。
 - **封面**：一张代表产品的 JPEG / PNG / WebP 图（≤ 10 MiB）。

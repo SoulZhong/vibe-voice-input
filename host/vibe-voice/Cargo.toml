@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "macOS Companion for Vibe Voice input on the FoloToy AI Passport"
-license = "MIT"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/SoulZhong/vibe-voice-input"
 publish = false
 
 [lib]

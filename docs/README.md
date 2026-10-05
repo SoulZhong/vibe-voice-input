@@ -18,7 +18,7 @@
   <a href="/docs/README.md"><img src="https://img.shields.io/badge/Open-firmware-14b8a6?style=flat-square" alt="Open firmware"></a>
   <a href="/docs/README.md"><img src="https://img.shields.io/badge/Wearable-AI-2563eb?style=flat-square" alt="Wearable AI"></a>
   <a href="/docs/development/ai-guide.md"><img src="https://img.shields.io/badge/Built-for_makers-f97316?style=flat-square" alt="Built for makers"></a>
-  <a href="/LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748b?style=flat-square" alt="MIT License"></a>
+  <a href="/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-64748b?style=flat-square" alt="AGPL-3.0 License"></a>
 </p>
 
 <p align="center">
@@ -217,6 +217,6 @@ provide reference material. Choose the entry that matches your task.
 
 ---
 
-[Contribute](../.github/CONTRIBUTING.md) · [Get help](../.github/SUPPORT.md) · [Code of conduct](../.github/CODE_OF_CONDUCT.md) · [Security](../.github/SECURITY.md) · [MIT License](../LICENSE)
+[Contribute](../.github/CONTRIBUTING.md) · [Get help](../.github/SUPPORT.md) · [Code of conduct](../.github/CODE_OF_CONDUCT.md) · [Security](../.github/SECURITY.md) · [AGPL-3.0 License](../LICENSE)
 
 AI agents: start with [`AGENTS.md`](../AGENTS.md) and follow its task-specific routing.
