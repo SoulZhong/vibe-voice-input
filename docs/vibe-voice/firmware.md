@@ -41,8 +41,8 @@ bar shows the Target label from TARGET_STATE (for example
 "WeChat · Zhang San", ellipsized when long) with a status dot — grey when unknown, mint
 when usable, amber with an amber outline when the Target is not usable — and
 the battery percentage with a small battery glyph at top right (`--` and an
-empty glyph when the gauge returns `-1`). While dictating, waiting or showing a
-result, the 20 px logo of the Target's app (TARGET_STATE `app`) sits before the
+empty glyph when the gauge returns `-1`). Whenever the Target is known, the 20 px
+logo of the Target's app (TARGET_STATE `app`) sits at the top left before the
 pill. The bottom two lines show short
 control hints, or a toast that temporarily replaces them.
 

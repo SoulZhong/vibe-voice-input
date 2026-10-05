@@ -1,8 +1,8 @@
 // main/vv_ui.c -- Vibe Voice "voice remote" screen. See vv_ui.h.
 //
 // Layout (240x320, the BSP masks the corners with a 30 px radius):
-//   y  10..36   top bar: Target pill (left, after a 20 px app logo while
-//               dictating, waiting or showing a result), battery (right)
+//   y  10..36   top bar: 20 px Target app logo and Target pill (left),
+//               battery percentage and gauge (right)
 //   y  44..262  page for the current state (centre / dictation / result / picker)
 //   y 268..308  control hints, or a toast that temporarily replaces them
 #include "vv_ui.h"
@@ -148,16 +148,17 @@ static void set_bg(lv_obj_t *obj, uint32_t color) {
 // Construction
 
 static void build_top_bar(void) {
-    ui.pill = box(ui.scr, 20, 10, 140, 26, C_SURFACE, 13);
+    ui.pill = box(ui.scr, 20, 10, 124, 26, C_SURFACE, 13);
     lv_obj_set_style_border_color(ui.pill, lv_color_hex(C_AMBER), 0);
     ui.pill_dot = box(ui.pill, 10, 9, 8, 8, C_DIM, LV_RADIUS_CIRCLE);
-    ui.pill_label = text(ui.pill, FONT_BODY, C_TEXT, 24, 2, 108, LV_TEXT_ALIGN_LEFT);
+    ui.pill_label = text(ui.pill, FONT_BODY, C_TEXT, 24, 2, 92, LV_TEXT_ALIGN_LEFT);
     lv_obj_set_height(ui.pill_label, 22);
     lv_label_set_long_mode(ui.pill_label, LV_LABEL_LONG_MODE_DOTS);
 
     ui.pill_logo = image(ui.scr, 18, 13);
 
-    ui.batt_label = text(ui.scr, FONT_BODY, C_MUTED, 160, 12, 36, LV_TEXT_ALIGN_RIGHT);
+    ui.batt_label = text(ui.scr, FONT_BODY, C_MUTED, 146, 12, 50, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_long_mode(ui.batt_label, LV_LABEL_LONG_MODE_CLIP);
     ui.batt_body = box(ui.scr, 199, 17, 18, 11, C_BG, 3);
     lv_obj_set_style_border_width(ui.batt_body, 1, 0);
     lv_obj_set_style_border_color(ui.batt_body, lv_color_hex(C_MUTED), 0);
@@ -270,16 +271,16 @@ void vv_ui_init(const char *device_name) {
 // ---------------------------------------------------------------------------
 // Rendering
 
-// Small logo before the pill while dictating, waiting or showing a result.
+// Small Target app logo at the top left whenever the Target is known. The
+// pill ends at x=144 so "100%" fits beside the battery gauge.
 static void render_pill_logo(const vv_app_t *app) {
     int logo = vv_app_target_logo(app);
-    bool on = logo >= 0 && (app->state == VV_ST_DICTATING || app->state == VV_ST_WAITING ||
-                            app->state == VV_ST_RESULT);
+    bool on = logo >= 0;
     if (on) lv_image_set_src(ui.pill_logo, vv_icons_20[logo]);
     show(ui.pill_logo, on);
     lv_obj_set_x(ui.pill, on ? 44 : 20);
-    lv_obj_set_width(ui.pill, on ? 116 : 140);
-    lv_obj_set_width(ui.pill_label, on ? 84 : 108);
+    lv_obj_set_width(ui.pill, on ? 100 : 124);
+    lv_obj_set_width(ui.pill_label, on ? 68 : 92);
 }
 
 static void render_target(const vv_app_t *app) {
