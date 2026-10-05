@@ -1,242 +1,266 @@
-// main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
+// main/main.c -- Vibe Voice Device: voice input for vibe coding.
 //
-// 按键语义(全局统一):
-//   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
-//   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
-#include "bsp_i2c.h"
-#include "bsp_display.h"
-#include "bsp_button.h"
+// Tasks and ownership:
+//   esp_timer (button callbacks)  -> enqueue only
+//   NimBLE host (link/RX callbacks) -> enqueue only
+//   vv_ctl (this file)            owns vv_app_t, executes actions, renders UI
+//                                 under bsp_lvgl_lock(), polls the battery
+//   vv_audio                      capture + ADPCM + AUDIO frames
+//   vv_tx                         BLE notifications in FIFO order
+// The pure state machine lives in vv_app.c; see docs/vibe-voice/firmware.md.
+#include "vv_app.h"
+#include "vv_audio.h"
+#include "vv_ble.h"
+#include "vv_proto.h"
+#include "vv_ui.h"
+
 #include "bsp_audio.h"
 #include "bsp_battery.h"
-#include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
-#include "demo.h"
-#include "demo_navigation.h"
-#include "ui_pixel.h"
-#include "lvgl.h"
+#include "bsp_button.h"
+#include "bsp_display.h"
+#include "bsp_i2c.h"
+#include "bsp_pins.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "lvgl.h"
+#include "nvs_flash.h"
 
-static const char *TAG = "main";
+#include <stdio.h>
+#include <string.h>
 
-static const demo_entry_t DEMOS[] = {
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
-      .key = demo_display_key },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
-      .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
-      .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
-      .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
-      .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
-      .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
-      .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
-};
-#define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
-#define INPUT_QUEUE_DEPTH 8
+static const char *TAG = "vibe_voice";
+
+#define CTL_QUEUE_DEPTH  16
+#define CTL_STACK        6144
+#define CTL_PRIO         5
+#define TICK_MS          100
+#define BATTERY_POLL_MS  30000
+#define LVGL_LOCK_MS     100
+#define FRAME_SEND_MS    200
+
+typedef enum { CTL_BUTTON = 0, CTL_LINK, CTL_RX } ctl_kind_t;
 
 typedef struct {
-    bsp_btn_t btn;
-    bsp_btn_ev_t event;
-} input_event_t;
+    uint8_t kind;
+    uint8_t a;        // button / link event
+    uint8_t b;        // press kind
+    uint8_t len;      // RX length
+    uint32_t passkey;
+    uint8_t data[VV_FRAME_MAX];
+} ctl_event_t;
 
-// 各外设初始化结果:失败的项在菜单里标 [FAIL] 且不允许进入。
-static bool s_ok[DEMO_COUNT];
+static QueueHandle_t s_queue;
+static vv_app_t s_app;
+static char s_fw[48];
+static bool s_battery_ok;
 
-static lv_obj_t *s_menu_scr;
-static lv_obj_t *s_cards[DEMO_COUNT];
-static lv_obj_t *s_rows[DEMO_COUNT];
-static lv_obj_t *s_mascot;
-static demo_navigation_t s_navigation;
-static QueueHandle_t s_input_queue;
-static TaskHandle_t s_input_task;
-static volatile bool s_input_ready;
+static uint32_t now_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
-static void menu_refresh(void) {
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        lv_label_set_text_fmt(s_rows[i], "%s%s",
-                              DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
-        ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
-        lv_obj_set_style_text_color(s_rows[i],
-            s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
+static void log_heap(const char *when) {
+    ESP_LOGI(TAG, "heap %s: free=%u largest=%u min=%u", when,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
+
+// Caller holds bsp_lvgl_lock().
+static void log_lvgl_pool(const char *when) {
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    ESP_LOGI(TAG, "LVGL pool %s: used=%u%% max_used=%u free=%u largest=%u", when,
+             (unsigned)mon.used_pct, (unsigned)mon.max_used, (unsigned)mon.free_size,
+             (unsigned)mon.free_biggest_size);
+}
+
+// --- Producers (must not block) -----------------------------------------------
+
+static void post(const ctl_event_t *ev) {
+    if (s_queue && xQueueSend(s_queue, ev, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "control queue full; event %u dropped", ev->kind);
     }
 }
 
-static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
-
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
-        s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(s_rows[i]);
-    }
-
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 101, 242);
-
-    menu_refresh();
-    lv_screen_load(s_menu_scr);
-}
-
-static void enter_menu(void) {
-    menu_build();
-}
-
-static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
-    if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
-    if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
-    if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
-    if (btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_CLICK;
-    return DEMO_NAV_INPUT_OTHER;
-}
-
-static void process_input(const input_event_t *input) {
-    demo_nav_input_t nav_input = navigation_input(input->btn, input->event);
-
-    if (s_navigation.active >= 0) {
-        demo_nav_result_t result = demo_navigation_handle(&s_navigation, nav_input, true);
-        const demo_entry_t *demo = &DEMOS[result.index];
-        if (result.action == DEMO_NAV_ACTION_EXIT) {
-            esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
-            if (e != ESP_OK) {
-                ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-                return;
-            }
-            if (!bsp_lvgl_lock(500)) return;
-            demo->exit();
-            demo_navigation_complete_exit(&s_navigation);
-            enter_menu();
-            bsp_lvgl_unlock();
-        } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
-            demo->key(input->btn, input->event);
-        }
-        return;
-    }
-
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
-    if (!bsp_lvgl_lock(500)) return;
-    demo_nav_result_t result = demo_navigation_handle(
-        &s_navigation, nav_input, s_ok[s_navigation.selected]);
-    if (result.action == DEMO_NAV_ACTION_REFRESH) {
-        menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (result.action == DEMO_NAV_ACTION_ENTER) {
-        const demo_entry_t *demo = &DEMOS[result.index];
-        ui_pixel_mascot_jump(s_mascot);
-        lv_obj_delete(s_menu_scr);
-        s_menu_scr = NULL;
-        s_mascot = NULL;
-        demo->enter();
-        bsp_lvgl_unlock();
-
-        esp_err_t e = demo->start ? demo->start() : ESP_OK;
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "%s 页面启动失败: %s", demo->name, esp_err_to_name(e));
-        }
-        return;
-    }
-    bsp_lvgl_unlock();
-}
-
-static void input_task(void *arg) {
-    (void)arg;
-    input_event_t input;
-    for (;;) {
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
-            process_input(&input);
-        }
-    }
-}
-
-static esp_err_t input_dispatch_init(void) {
-    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
-    if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "demo_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static void input_dispatch_deinit(void) {
-    s_input_ready = false;
-    if (s_input_task) {
-        vTaskDelete(s_input_task);
-        s_input_task = NULL;
-    }
-    if (s_input_queue) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-    }
-}
-
-// button callbacks run on the shared esp_timer task; enqueue only and return immediately.
-static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
+static void on_button(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
-    if (!s_input_ready || !s_input_queue) return;
-    const input_event_t input = { .btn = btn, .event = ev };
-    (void)xQueueSend(s_input_queue, &input, 0);
+    vv_press_t press;
+    switch (ev) {
+    case BSP_BTN_CLICK: press = VV_PRESS_CLICK; break;
+    case BSP_BTN_DOUBLE: press = VV_PRESS_DOUBLE; break;
+    case BSP_BTN_LONG: press = VV_PRESS_LONG; break;
+    default: return;  // PRESS: act on CLICK so long-press can be told apart
+    }
+    vv_btn_t b = btn == BSP_BTN_UP ? VV_BTN_UP : (btn == BSP_BTN_DOWN ? VV_BTN_DOWN : VV_BTN_OK);
+    ctl_event_t e = { .kind = CTL_BUTTON, .a = (uint8_t)b, .b = (uint8_t)press };
+    post(&e);
 }
+
+static void on_link(vv_link_ev_t ev, uint32_t passkey) {
+    ctl_event_t e = { .kind = CTL_LINK, .a = (uint8_t)ev, .passkey = passkey };
+    post(&e);
+}
+
+static void on_rx(const uint8_t *data, size_t len) {
+    if (len == 0 || len > VV_FRAME_MAX) return;
+    ctl_event_t e = { .kind = CTL_RX, .len = (uint8_t)len };
+    memcpy(e.data, data, len);
+    post(&e);
+}
+
+// --- Controller ---------------------------------------------------------------
+
+static void execute(const vv_actions_t *act) {
+    if (act->flags & VV_ACT_AUDIO_STOP) vv_audio_stop();
+    for (int i = 0; i < act->frame_count; i++) {
+        if (!vv_ble_send(&act->frames[i], FRAME_SEND_MS)) {
+            ESP_LOGW(TAG, "frame 0x%02x not sent", act->frames[i].data[0]);
+        }
+    }
+    if (act->flags & VV_ACT_AUDIO_START) vv_audio_start(act->dict);
+}
+
+static void handle(const ctl_event_t *ev, uint32_t now, vv_actions_t *act) {
+    switch (ev->kind) {
+    case CTL_BUTTON:
+        vv_app_button(&s_app, (vv_btn_t)ev->a, (vv_press_t)ev->b, now, act);
+        break;
+    case CTL_LINK: {
+        vv_link_ev_t link = (vv_link_ev_t)ev->a;
+        vv_app_link(&s_app, link, ev->passkey, now, act);
+        if (link == VV_LINK_READY) {
+            log_heap("link ready");
+            if (bsp_lvgl_lock(LVGL_LOCK_MS)) {
+                log_lvgl_pool("link ready");
+                bsp_lvgl_unlock();
+            }
+        }
+        break;
+    }
+    case CTL_RX: {
+        vv_msg_t msg;
+        if (vv_proto_decode(ev->data, ev->len, &msg)) {
+            vv_app_frame(&s_app, &msg, now, act);
+        } else {
+            ESP_LOGW(TAG, "ignored frame type 0x%02x len %u", ev->data[0], ev->len);
+            act->flags = 0;
+            act->frame_count = 0;
+        }
+        break;
+    }
+    default:
+        act->flags = 0;
+        act->frame_count = 0;
+        break;
+    }
+}
+
+static void controller_task(void *arg) {
+    (void)arg;
+    static ctl_event_t ev;
+    static vv_actions_t act;
+    uint32_t pending_dirty = 0;
+    uint32_t last_tick = now_ms();
+    uint32_t last_battery = last_tick - BATTERY_POLL_MS;
+    int battery = -1;
+    bool battery_dirty = false;
+
+    for (;;) {
+        if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
+            uint32_t now = now_ms();
+            handle(&ev, now, &act);
+            execute(&act);
+            if (ev.kind == CTL_LINK && ev.a == VV_LINK_DISCONNECTED) {
+                ESP_LOGI(TAG, "BLE frames dropped so far: %u", (unsigned)vv_ble_dropped());
+            }
+        }
+
+        uint32_t now = now_ms();
+        bool ticked = now - last_tick >= TICK_MS;
+        if (ticked) {
+            last_tick = now;
+            vv_app_tick(&s_app, now, &act);
+            execute(&act);
+        }
+        if (s_battery_ok && now - last_battery >= BATTERY_POLL_MS) {
+            last_battery = now;
+            int soc = bsp_battery_soc();
+            if (soc != battery) {
+                battery = soc;
+                battery_dirty = true;
+            }
+        }
+
+        pending_dirty |= vv_app_take_dirty(&s_app);
+        bool meter = ticked && s_app.state == VV_ST_DICTATING;
+        if (!pending_dirty && !battery_dirty && !meter) continue;
+        if (!bsp_lvgl_lock(LVGL_LOCK_MS)) continue;  // retry on the next loop
+        if (pending_dirty) vv_ui_render(&s_app, pending_dirty);
+        if (battery_dirty) vv_ui_set_battery(battery);
+        if (meter) vv_ui_push_level(vv_audio_level());
+        bsp_lvgl_unlock();
+        pending_dirty = 0;
+        battery_dirty = false;
+    }
+}
+
+// --- Startup ------------------------------------------------------------------
 
 void app_main(void) {
-    ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
-    }
+    const esp_app_desc_t *desc = esp_app_get_description();
+    snprintf(s_fw, sizeof(s_fw), "VibeVoice/%s", desc->version);
+    ESP_LOGI(TAG, "%s starting", s_fw);
+    log_heap("boot");
+
+    // Bonds live in NVS. Never erase it here: that would destroy bonds and
+    // any other stored data just to hide a partition problem.
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "nvs_flash_init: %s (bonds will not persist)",
+                                esp_err_to_name(err));
 
     bsp_i2c_init();
-    bsp_i2c_scan();
-
-    // 屏幕是本 demo 的 UI 载体,失败就没有菜单可言 —— 打清楚日志后退出,
-    // 不做"串口菜单"降级(那会让本文件复杂一倍,违背参考示例的初衷)。
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "显示/LVGL 初始化失败,demo 无法继续。"
-                      "检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
+        ESP_LOGE(TAG, "display/LVGL init failed (MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
                  BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
         return;
     }
-    bsp_display_backlight(100);
+    bsp_display_backlight(90);
 
-    demo_navigation_init(&s_navigation, DEMO_COUNT);
-
-    // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
-    esp_err_t input_err = input_dispatch_init();
-    esp_err_t button_err = input_err == ESP_OK
-                         ? bsp_button_init(on_key, NULL)
-                         : ESP_ERR_INVALID_STATE;
-    s_ok[1] = input_err == ESP_OK && button_err == ESP_OK;
-    if (input_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
-    } else if (button_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
-        input_dispatch_deinit();
+    s_queue = xQueueCreate(CTL_QUEUE_DEPTH, sizeof(ctl_event_t));
+    if (!s_queue) {
+        ESP_LOGE(TAG, "control queue allocation failed");
+        return;
     }
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
+    vv_app_init(&s_app, s_fw);
+
+    if (bsp_audio_init() != ESP_OK || vv_audio_init() != ESP_OK) {
+        ESP_LOGE(TAG, "audio unavailable: Dictations will carry no audio");
+    }
+    s_battery_ok = bsp_battery_init() == ESP_OK;
+    if (!s_battery_ok) ESP_LOGW(TAG, "battery gauge unavailable");
+    log_heap("before BLE");
+
+    err = vv_ble_start(on_link, on_rx);
+    if (err != ESP_OK) ESP_LOGE(TAG, "BLE start failed: %s", esp_err_to_name(err));
+    log_heap("after BLE start");
 
     if (bsp_lvgl_lock(1000)) {
-        enter_menu();
+        vv_ui_init(vv_ble_name());
+        vv_ui_render(&s_app, vv_app_take_dirty(&s_app));
+        log_lvgl_pool("after UI");
         bsp_lvgl_unlock();
-        s_input_ready = true;
     }
 
-    ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+    if (xTaskCreate(controller_task, "vv_ctl", CTL_STACK, NULL, CTL_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "controller task creation failed");
+        return;
+    }
+    err = bsp_button_init(on_button, NULL);
+    if (err != ESP_OK) ESP_LOGE(TAG, "buttons unavailable: %s", esp_err_to_name(err));
+    log_heap("ready");
 }

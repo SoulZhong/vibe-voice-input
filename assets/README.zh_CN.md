@@ -15,6 +15,10 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+| 目录 | 内容 | 用途与来源 |
+| --- | --- | --- |
+| [`fonts/vibe-voice/`](fonts/vibe-voice/README.zh_CN.md) | 生成的 LVGL C 字库：16 px GB2312 正文、24 px 标题、48 px 配对码数字 | Vibe Voice 设备界面；Noto Sans SC（OFL 1.1），由 `tools/vibe_fonts.py` 重新生成 |
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。
