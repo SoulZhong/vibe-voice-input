@@ -39,6 +39,7 @@ objc2-avf-audio = "0.3"
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-application-services = "0.3"
+objc2-service-management = "0.3"
 
 [profile.release]
 lto = "thin"

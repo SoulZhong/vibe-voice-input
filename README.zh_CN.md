@@ -52,8 +52,8 @@ flowchart LR
 
 ## 快速开始
 
-1. **刷写固件**（已激活 ESP-IDF 5.5.3）：运行 `./tools/validate.sh`，然后把 `build/vibe-voice-input-full.bin` 写到 `0x0`。刷写合并镜像会清除已保存的配对信息。
-2. **构建配套程序**：`cd host/vibe-voice && ./scripts/bundle.sh`，然后打开 `target/bundle/VibeVoice.app`，按提示授予蓝牙、语音识别和辅助功能权限。
+1. **刷写固件**：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 下载 `vibe-voice-input-<版本>-full.bin`，写到 `0x0`（`esptool.py --chip esp32c3 write_flash 0x0 vibe-voice-input-<版本>-full.bin`）。也可自行构建（已激活 ESP-IDF 5.5.3）：运行 `./tools/validate.sh`，再刷写 `build/vibe-voice-input-full.bin`。刷写合并镜像会清除已保存的配对信息。
+2. **安装配套程序**：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 下载 `VibeVoice-<版本>-macos-universal.zip`，解压后把 `VibeVoice.app` 移到“应用程序”并打开（或从源码构建安装：`cd host/vibe-voice && ./scripts/install.sh`）。此后它会开机自动启动。按提示授予蓝牙、语音识别和辅助功能权限。
 3. **配对**：设备显示 6 位配对码，在 macOS 弹窗中输入。
 
 详情：[配套程序 README](host/vibe-voice/README.zh_CN.md) · [固件](docs/vibe-voice/firmware.zh_CN.md) · [BLE 协议](docs/vibe-voice/protocol.zh_CN.md) · [术语表](docs/vibe-voice/CONTEXT.zh_CN.md)。

@@ -8,6 +8,7 @@ pub mod adpcm;
 pub mod alerts;
 pub mod audio;
 pub mod config;
+pub mod login_item;
 pub mod orca;
 pub mod protocol;
 pub mod session;
@@ -18,6 +19,8 @@ pub mod voice_notes;
 pub mod ble;
 #[cfg(target_os = "macos")]
 pub mod inject_macos;
+#[cfg(target_os = "macos")]
+pub mod login_macos;
 #[cfg(target_os = "macos")]
 pub mod speech;
 #[cfg(target_os = "macos")]

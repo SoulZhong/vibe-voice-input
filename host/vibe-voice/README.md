@@ -17,6 +17,25 @@ the wire format is [`docs/vibe-voice/protocol.md`](../../docs/vibe-voice/protoco
 - The Mandarin on-device speech model (System Settings > Keyboard > Dictation,
   add Chinese) for offline recognition. Without it Apple's server is used.
 
+## Install
+
+- **Download**: get `VibeVoice-<version>-macos-universal.zip` from
+  [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) (Apple Silicon and Intel, Developer ID signed and
+  notarized), unzip, move `VibeVoice.app` to `/Applications` and open it.
+- **From source**: `./scripts/install.sh` builds the app, quits a running copy,
+  installs it to `/Applications/VibeVoice.app` (or `~/Applications` when
+  `/Applications` is not writable), and starts it. Run it again to update; pass
+  `VV_SIGN_IDENTITY` to keep the Accessibility grant across updates.
+
+**Launch at login.** An installed copy (running from `/Applications` or
+`~/Applications`) registers itself as a login item (SMAppService) on first
+start. Turn it off or on with the checkable menu bar item for launch at login
+(labelled in Chinese, under the link state); the choice is kept in `~/.config/vibe-voice/settings.json`
+(`{"launch_at_login": false}` disables it). If macOS asks for approval, allow
+Vibe Voice in System Settings > General > Login Items. Development builds
+(`target/bundle`, `cargo run`) never register; their menu item is disabled with
+a hint to run `install.sh`.
+
 ## Build and test
 
 ```bash
@@ -27,12 +46,33 @@ scripts/bundle.sh                # release build -> target/bundle/VibeVoice.app
 ```
 
 `bundle.sh` writes `VibeVoice.app` (bundle id `cn.folotoy.vibevoice`, menu bar
-agent without a Dock icon) and signs it ad hoc. Copy it to `/Applications` if
-you like and open it from Finder or with `open`.
+agent without a Dock icon) and signs it ad hoc (`VV_SIGN_IDENTITY` for a real
+identity). `VV_UNIVERSAL=1` builds an arm64 + x86_64 binary, `VV_HARDENED=1`
+signs with the hardened runtime and a secure timestamp, `VV_VERSION` sets the
+bundle version. Use `install.sh` to install it.
+
+### Releases (maintainers)
+
+```bash
+. ~/esp/esp-idf-v5.5.3/export.sh
+VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh --dry-run v0.1.0
+VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh v0.1.0
+```
+
+From a clean tree, `release.sh` builds the firmware through the full gate,
+builds the universal, hardened, Developer ID signed app, zips it, notarizes and
+staples it (`NOTARY_PROFILE`, default `voice-notes-notary`), checks it with
+`spctl`, writes `SHA256SUMS.txt` and release notes under `build/release/<version>/`,
+tags and pushes `<version>`, and creates the GitHub Release with `gh`. Every
+external step is printed first; `--dry-run` skips notarization, the tag, the
+push and the upload. No entitlements are needed under the hardened runtime:
+Bluetooth and Speech use Info.plist usage strings, Accessibility is a TCC grant,
+and the app uses no runtime exceptions.
 
 ## Permissions
 
-Start the app with `open target/bundle/VibeVoice.app` (or from Finder). macOS
+Start the installed app from Finder or with `open` (a development build:
+`open target/bundle/VibeVoice.app`). macOS
 asks for each permission once:
 
 | Permission | Why | Where to fix |

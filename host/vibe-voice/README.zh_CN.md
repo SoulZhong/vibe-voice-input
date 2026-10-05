@@ -14,6 +14,20 @@ Vibe Voice 语音输入的 **Companion**：通过低功耗蓝牙与 AI Passport�
 - Rust 1.88 及以上（`cargo`）。
 - 离线识别需要普通话端侧模型（系统设置 > 键盘 > 听写，添加中文）；没有时会使用 Apple 服务器。
 
+## 安装
+
+- **下载**：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 获取 `VibeVoice-<版本>-macos-universal.zip`（支持 Apple Silicon 与
+  Intel，Developer ID 签名并已公证），解压后把 `VibeVoice.app` 移到 `/Applications` 并打开。
+- **从源码安装**：`./scripts/install.sh` 会构建应用、退出正在运行的旧版本、安装到
+  `/Applications/VibeVoice.app`（`/Applications` 不可写时为 `~/Applications`）并启动它。再次运行即可
+  更新；设置 `VV_SIGN_IDENTITY` 可在更新后保留辅助功能授权。
+
+**开机自启动。** 已安装的副本（从 `/Applications` 或 `~/Applications` 运行）首次启动时会把自己注册为
+登录项（SMAppService）。可在菜单栏的 **开机自启动** 项中关闭或开启；该选择保存在
+`~/.config/vibe-voice/settings.json`（`{"launch_at_login": false}` 表示关闭）。如 macOS 要求批准，
+请在 系统设置 > 通用 > 登录项 中允许 Vibe Voice。开发构建（`target/bundle`、`cargo run`）从不注册，
+其菜单项为灰色，并提示先运行 `install.sh`。
+
 ## 构建与测试
 
 ```bash
@@ -24,11 +38,28 @@ scripts/bundle.sh                # release 构建 -> target/bundle/VibeVoice.app
 ```
 
 `bundle.sh` 生成 `VibeVoice.app`（bundle id `cn.folotoy.vibevoice`，菜单栏常驻、无 Dock
-图标）并做 ad-hoc 签名。可复制到 `/Applications`，从访达或 `open` 启动。
+图标）并做 ad-hoc 签名（设置 `VV_SIGN_IDENTITY` 使用真实身份）。`VV_UNIVERSAL=1` 构建 arm64 + x86_64
+通用二进制，`VV_HARDENED=1` 以 hardened runtime 和安全时间戳签名，`VV_VERSION` 设置应用版本号。
+安装请用 `install.sh`。
+
+### 发布（维护者）
+
+```bash
+. ~/esp/esp-idf-v5.5.3/export.sh
+VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh --dry-run v0.1.0
+VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh v0.1.0
+```
+
+在干净的工作区中，`release.sh` 通过完整门禁构建固件，构建通用、hardened、Developer ID 签名的应用并
+打包，公证并装订（`NOTARY_PROFILE`，默认 `voice-notes-notary`），用 `spctl` 检查，在
+`build/release/<版本>/` 下写出 `SHA256SUMS.txt` 和发布说明，打并推送 `<版本>` 标签，再用 `gh` 创建
+GitHub Release。每个外部步骤执行前都会先打印；`--dry-run` 跳过公证、打标签、推送和上传。hardened
+runtime 下无需任何 entitlement：蓝牙和语音识别通过 Info.plist 用途说明授权，辅助功能是 TCC 授权，
+应用也不使用任何运行时例外。
 
 ## 权限
 
-用 `open target/bundle/VibeVoice.app`（或在访达中）启动。macOS 会逐项请求一次：
+从访达或用 `open` 启动已安装的应用（开发构建：`open target/bundle/VibeVoice.app`）。macOS 会逐项请求一次：
 
 | 权限 | 用途 | 修改位置 |
 | --- | --- | --- |
