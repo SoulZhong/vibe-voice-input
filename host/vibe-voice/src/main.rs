@@ -5,7 +5,8 @@
 //!   vibe-voice --simulate <file>   feed a 16 kHz mono 16-bit WAV/PCM file
 //!                                  through ADPCM, the protocol logic and
 //!                                  Apple Speech; prints frames, inserts nothing
-//!   vibe-voice --orca-list         print Orca Sessions as the Device sees them
+//!   vibe-voice --orca-list         print Orca Sessions as the Device sees them,
+//!                                  Current Conversation first (read-only)
 //!   vibe-voice --check             print permission and recognizer status
 
 #[cfg(not(target_os = "macos"))]

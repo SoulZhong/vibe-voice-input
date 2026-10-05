@@ -27,6 +27,9 @@
 #define VV_H_FAILED           "未完成"
 #define VV_H_PICKER_ROOT      "选择目标"
 #define VV_H_PICKER_ORCA      "Orca 会话"
+#define VV_H_PICKER_WECHAT    "微信会话"
+#define VV_H_PICKER_CHATGPT   "ChatGPT 会话"
+#define VV_H_PICKER_WECOM     "企业微信会话"
 
 // ---- Body text (16 px) -----------------------------------------------------
 #define VV_T_NO_TARGET        "未选择目标"
@@ -47,6 +50,9 @@
 #define VV_T_FAILED_BODY      "Mac 端返回未知状态"
 #define VV_T_PICKER_LOADING   "加载中…"
 #define VV_T_PICKER_EMPTY     "列表为空"
+#define VV_T_PICKER_NOT_RUN   "应用未运行"
+#define VV_T_PICKER_NO_CONV   "没有会话"
+#define VV_T_PICKER_JUMPING   "正在切换…"
 #define VV_T_PICKER_FAILED    "列表加载失败"
 
 // Toasts after SUBMIT / UNDO / pairing.
@@ -60,6 +66,7 @@
 #define VV_T_ACTION_FAILED    "操作失败"
 #define VV_T_PAIR_FAILED      "配对失败，请重试"
 #define VV_T_LIST_FAILED      "列表加载失败"
+#define VV_T_JUMPED           "已切换"
 
 // Companion STATUS codes (protocol section "Status codes").
 #define VV_T_STATUS_SPEECH    "未授予语音识别权限"

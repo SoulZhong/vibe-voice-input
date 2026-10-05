@@ -54,7 +54,25 @@ void vv_app_init(vv_app_t *app, const char *fw) {
     app->fw = fw ? fw : "";
     app->state = VV_ST_NO_LINK;
     app->dict_done = true;
+    app->target_app = VV_APP_NONE;
     app->dirty = VV_DIRTY_ALL;
+}
+
+const char *vv_app_target_title(const vv_app_t *app) {
+    if (!app->target_known) return "";
+    const char *sep = strstr(app->target_label, " · ");
+    return sep ? sep + strlen(" · ") : app->target_label;
+}
+
+int vv_app_target_logo(const vv_app_t *app) {
+    if (!app->target_known || app->target_app >= VV_APP_COUNT) return -1;
+    return app->target_app;
+}
+
+int vv_app_picker_logo(const vv_app_t *app, uint8_t row) {
+    if (app->picker_list != VV_LIST_ROOT || row >= app->picker_count) return -1;
+    uint8_t index = app->picker[row].index;
+    return index < VV_APP_COUNT ? index : -1;
 }
 
 uint32_t vv_app_take_dirty(vv_app_t *app) {
@@ -126,6 +144,7 @@ static void picker_request(vv_app_t *app, uint8_t list, uint32_t now_ms, vv_acti
     if (f) vv_proto_targets_req(f, list);
     app->picker_list = list;
     app->picker_loading = true;
+    app->picker_jumping = false;
     app->picker_count = 0;
     app->picker_cursor = 0;
     app->picker_since_ms = now_ms;
@@ -136,13 +155,14 @@ static void picker_request(vv_app_t *app, uint8_t list, uint32_t now_ms, vv_acti
 
 static void picker_close(vv_app_t *app) {
     app->picker_loading = false;
+    app->picker_jumping = false;
     app->picker_count = 0;
     app->dirty |= VV_DIRTY_PICKER;
     set_state(app, VV_ST_IDLE);
 }
 
 static void picker_move(vv_app_t *app, int delta) {
-    if (app->picker_loading || app->picker_count == 0) return;
+    if (app->picker_loading || app->picker_jumping || app->picker_count == 0) return;
     int count = app->picker_count;
     int cursor = ((int)app->picker_cursor + delta) % count;
     if (cursor < 0) cursor += count;
@@ -153,7 +173,7 @@ static void picker_move(vv_app_t *app, int delta) {
 static void picker_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, uint32_t now_ms,
                           vv_actions_t *out) {
     if (btn == VV_BTN_OK && press == VV_PRESS_LONG) {
-        if (app->picker_list != VV_LIST_ROOT) {
+        if (app->picker_list != VV_LIST_ROOT && !app->picker_jumping) {
             picker_request(app, VV_LIST_ROOT, now_ms, out);
         } else {
             picker_close(app);
@@ -166,15 +186,22 @@ static void picker_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, uint32_
     } else if (btn == VV_BTN_DOWN) {
         picker_move(app, step);
     } else if (btn == VV_BTN_OK && press == VV_PRESS_CLICK) {
-        if (app->picker_loading || app->picker_count == 0) return;
+        if (app->picker_loading || app->picker_jumping || app->picker_count == 0) return;
         const vv_item_t *item = &app->picker[app->picker_cursor];
-        if (item->flags & VV_ITEM_SUBLIST) {
-            picker_request(app, VV_LIST_ORCA, now_ms, out);
+        if (app->picker_list == VV_LIST_ROOT && (item->flags & VV_ITEM_SUBLIST) &&
+            item->index < VV_LIST_LAST) {
+            uint8_t flags = item->flags;
+            picker_request(app, (uint8_t)(item->index + 1), now_ms, out);
+            app->picker_parent_flags = flags;
             return;
         }
+        // Jump: the Companion sets the Target and brings it to the front;
+        // the picker closes when its TARGET_STATE arrives.
         vv_frame_t *f = push_frame(out);
         if (f) vv_proto_target_select(f, app->picker_list, item->index);
-        picker_close(app);
+        app->picker_jumping = true;
+        app->picker_since_ms = now_ms;
+        app->dirty |= VV_DIRTY_PICKER;
     }
 }
 
@@ -195,6 +222,19 @@ static void picker_end(vv_app_t *app, const vv_msg_t *msg) {
     app->dirty |= VV_DIRTY_PICKER;
 }
 
+// TARGET_STATE answering a Jump: close the picker with a short toast.
+static void picker_jumped(vv_app_t *app, uint8_t status, uint32_t now_ms) {
+    vv_toast_t toast;
+    switch (status) {
+    case VV_STATUS_OK: toast = VV_TOAST_JUMPED; break;
+    case VV_STATUS_TARGET_UNAVAILABLE: toast = VV_TOAST_TARGET_DOWN; break;
+    case VV_STATUS_PERMISSION: toast = VV_TOAST_PERMISSION; break;
+    default: toast = VV_TOAST_FAILED; break;
+    }
+    picker_close(app);
+    set_toast(app, toast, now_ms, VV_TOAST_MS);
+}
+
 // ---------------------------------------------------------------------------
 // Events
 
@@ -205,6 +245,7 @@ static void drop_link(vv_app_t *app, vv_actions_t *out) {
     app->dict_done = true;
     app->link_ready = false;
     app->picker_loading = false;
+    app->picker_jumping = false;
     app->picker_count = 0;
     app->passkey = 0;
     app->dirty |= VV_DIRTY_PICKER;
@@ -326,8 +367,10 @@ void vv_app_frame(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms, vv_action
         app->target_known = true;
         app->target_status = msg->a;
         app->target_kind = msg->b;
+        app->target_app = msg->c;
         copy_text(app->target_label, sizeof(app->target_label), msg->text, msg->text_len, NULL);
         app->dirty |= VV_DIRTY_TARGET;
+        if (app->state == VV_ST_PICKER && app->picker_jumping) picker_jumped(app, msg->a, now_ms);
         break;
     default:
         break;
@@ -404,10 +447,17 @@ void vv_app_tick(vv_app_t *app, uint32_t now_ms, vv_actions_t *out) {
         if (vv_time_reached(now_ms, app->result_until_ms)) set_state(app, VV_ST_IDLE);
         break;
     case VV_ST_PICKER:
-        if (app->picker_loading &&
-            vv_time_reached(now_ms, app->picker_since_ms + VV_PICKER_TIMEOUT_MS)) {
+        if (app->picker_loading) {
+            uint32_t limit = app->picker_list == VV_LIST_ORCA ? VV_PICKER_LAUNCH_MS
+                                                              : VV_PICKER_TIMEOUT_MS;
+            if (vv_time_reached(now_ms, app->picker_since_ms + limit)) {
+                picker_close(app);
+                set_toast(app, VV_TOAST_LIST_FAILED, now_ms, VV_RESULT_ERR_MS);
+            }
+        } else if (app->picker_jumping &&
+                   vv_time_reached(now_ms, app->picker_since_ms + VV_JUMP_TIMEOUT_MS)) {
             picker_close(app);
-            set_toast(app, VV_TOAST_LIST_FAILED, now_ms, VV_RESULT_ERR_MS);
+            set_toast(app, VV_TOAST_FAILED, now_ms, VV_RESULT_ERR_MS);
         }
         break;
     default:

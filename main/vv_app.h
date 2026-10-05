@@ -12,7 +12,8 @@
 //   DICTATING audio streaming, Partial Text shown
 //   WAITING   DICT_STOP sent, waiting for RESULT
 //   RESULT    transient outcome (Segment preview or error); buttons act as IDLE
-//   PICKER    Target list (root list or Orca Sessions)
+//   PICKER    Jump picker: the Supported Apps, then one app's conversations;
+//             choosing one sends TARGET_SELECT and closes on TARGET_STATE
 #pragma once
 
 #include "vv_proto.h"
@@ -28,8 +29,11 @@
 #define VV_STATUS_TEXT_MAX  96
 
 #define VV_DICTATION_LIMIT_MS   (5u * 60u * 1000u)
-#define VV_WAIT_RESULT_MS       20000u
+// The Companion may launch Orca (up to 20 s) before it Inserts or lists.
+#define VV_WAIT_RESULT_MS       30000u
 #define VV_PICKER_TIMEOUT_MS    5000u
+#define VV_PICKER_LAUNCH_MS     25000u   // Orca list: may launch Orca first
+#define VV_JUMP_TIMEOUT_MS      5000u    // TARGET_SELECT -> TARGET_STATE
 #define VV_HELLO_RETRY_MS       1000u
 #define VV_TOAST_MS             2500u
 #define VV_PENDING_TOAST_MS     5000u
@@ -83,6 +87,7 @@ typedef enum {
     VV_TOAST_FAILED,
     VV_TOAST_PAIR_FAILED,
     VV_TOAST_LIST_FAILED,
+    VV_TOAST_JUMPED,
 } vv_toast_t;
 
 // Dirty flags for the UI.
@@ -129,6 +134,7 @@ typedef struct {
     bool target_known;
     uint8_t target_status;
     uint8_t target_kind;
+    uint8_t target_app;    // VV_APP_* or VV_APP_NONE
     char target_label[VV_TARGET_LABEL_MAX];
 
     uint8_t companion_code;
@@ -151,7 +157,9 @@ typedef struct {
     uint32_t toast_until_ms;
 
     uint8_t picker_list;
+    uint8_t picker_parent_flags;   // flags of the root row that opened the sub-list
     bool picker_loading;
+    bool picker_jumping;           // TARGET_SELECT sent, waiting for TARGET_STATE
     uint8_t picker_count;
     uint8_t picker_cursor;
     uint32_t picker_since_ms;
@@ -171,6 +179,17 @@ void vv_app_tick(vv_app_t *app, uint32_t now_ms, vv_actions_t *out);
 
 // Returns and clears the accumulated dirty flags.
 uint32_t vv_app_take_dirty(vv_app_t *app);
+
+// The conversation part of the Target label ("<App> · <title>" -> "<title>"),
+// or the whole label when it has no title; "" when the Target is unknown.
+const char *vv_app_target_title(const vv_app_t *app);
+
+// Logo index for the Target (VV_APP_*), or -1 when unknown or out of range.
+int vv_app_target_logo(const vv_app_t *app);
+
+// Logo index for root picker row `row` (rows are the Supported Apps in
+// order), or -1 outside the root list or for an unknown row.
+int vv_app_picker_logo(const vv_app_t *app, uint8_t row);
 
 // Wrap-safe "a is at or after b" for millisecond timestamps.
 static inline bool vv_time_reached(uint32_t now_ms, uint32_t deadline_ms) {

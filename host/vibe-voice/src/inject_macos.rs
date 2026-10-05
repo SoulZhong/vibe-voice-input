@@ -1,4 +1,4 @@
-//! macOS input injection for App Targets: activation, Accessibility window
+//! macOS app control for Supported Apps: activation, Accessibility window
 //! titles, clipboard paste with restore, and synthesized keys via CGEvent.
 
 use crate::session::{InjectError, Injector};
@@ -161,21 +161,13 @@ fn restore_clipboard(pb: &NSPasteboard, saved: SavedClipboard) {
 pub struct MacInjector;
 
 impl MacInjector {
-    fn target(
-        &self,
-        bundle_id: Option<&str>,
-    ) -> Result<Option<Retained<NSRunningApplication>>, InjectError> {
+    /// Check Accessibility, then bring the app to the front.
+    fn target(&self, bundle_id: &str) -> Result<(), InjectError> {
         if !accessibility_trusted(false) {
             return Err(InjectError::Permission);
         }
-        match bundle_id {
-            None => Ok(None),
-            Some(b) => {
-                let app = running_app(b).ok_or(InjectError::NotRunning)?;
-                activate(&app)?;
-                Ok(Some(app))
-            }
-        }
+        let app = running_app(bundle_id).ok_or(InjectError::NotRunning)?;
+        activate(&app)
     }
 }
 
@@ -188,49 +180,25 @@ impl Injector for MacInjector {
         running_app(bundle_id).is_some()
     }
 
-    fn resolve_bundle_id(&mut self, path: &str) -> Option<String> {
-        let candidates = [
-            path.to_owned(),
-            path.replacen(
-                "/Applications/",
-                &format!(
-                    "{}/Applications/",
-                    std::env::var("HOME").unwrap_or_default()
-                ),
-                1,
-            ),
-        ];
-        candidates.iter().find_map(|p| {
-            objc2_foundation::NSBundle::bundleWithPath(&NSString::from_str(p))
-                .and_then(|b| b.bundleIdentifier())
-                .map(|s| s.to_string())
-        })
-    }
-
     fn frontmost_bundle_id(&mut self) -> Option<String> {
         frontmost_app()
             .and_then(|a| a.bundleIdentifier())
             .map(|b| b.to_string())
     }
 
-    fn focused_title(&mut self, bundle_id: Option<&str>) -> Option<(String, String)> {
-        let app = match bundle_id {
-            Some(b) => running_app(b)?,
-            None => frontmost_app()?,
-        };
-        let name = app
-            .localizedName()
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        let title = if accessibility_trusted(false) {
-            window_title(app.processIdentifier())
-        } else {
-            None
-        };
-        Some((name, title.unwrap_or_default()))
+    fn window_title(&mut self, bundle_id: &str) -> Option<String> {
+        if !accessibility_trusted(false) {
+            return None;
+        }
+        window_title(running_app(bundle_id)?.processIdentifier())
     }
 
-    fn insert(&mut self, bundle_id: Option<&str>, text: &str) -> Result<(), InjectError> {
+    fn activate(&mut self, bundle_id: &str) -> Result<(), InjectError> {
+        let app = running_app(bundle_id).ok_or(InjectError::NotRunning)?;
+        activate(&app)
+    }
+
+    fn insert(&mut self, bundle_id: &str, text: &str) -> Result<(), InjectError> {
         self.target(bundle_id)?;
         let pb = NSPasteboard::generalPasteboard();
         let saved = save_clipboard(&pb);
@@ -245,10 +213,7 @@ impl Injector for MacInjector {
         let array = NSArray::from_retained_slice(&[ProtocolObject::from_retained(item)]);
         pb.writeObjects(&array);
         let ours = pb.changeCount();
-        log::info!(
-            "paste: clipboard set (change {ours}), posting Cmd+V, AX trusted={}",
-            accessibility_trusted(false)
-        );
+        log::info!("paste: clipboard set (change {ours}), posting Cmd+V");
         let result = post_key(KEY_V, CGEventFlags::MaskCommand);
         sleep(RESTORE_DELAY);
         if pb.changeCount() == ours {
@@ -259,12 +224,12 @@ impl Injector for MacInjector {
         result
     }
 
-    fn submit(&mut self, bundle_id: Option<&str>) -> Result<(), InjectError> {
+    fn submit(&mut self, bundle_id: &str) -> Result<(), InjectError> {
         self.target(bundle_id)?;
         post_key(KEY_RETURN, CGEventFlags::empty())
     }
 
-    fn delete_back(&mut self, bundle_id: Option<&str>, count: usize) -> Result<(), InjectError> {
+    fn delete_back(&mut self, bundle_id: &str, count: usize) -> Result<(), InjectError> {
         self.target(bundle_id)?;
         for _ in 0..count {
             post_key(KEY_DELETE, CGEventFlags::empty())?;

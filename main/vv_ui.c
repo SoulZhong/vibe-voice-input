@@ -1,11 +1,13 @@
 // main/vv_ui.c -- Vibe Voice "voice remote" screen. See vv_ui.h.
 //
 // Layout (240x320, the BSP masks the corners with a 30 px radius):
-//   y  10..36   top bar: Target pill (left), battery (right)
+//   y  10..36   top bar: Target pill (left, after a 20 px app logo while
+//               dictating, waiting or showing a result), battery (right)
 //   y  44..262  page for the current state (centre / dictation / result / picker)
 //   y 268..308  control hints, or a toast that temporarily replaces them
 #include "vv_ui.h"
 
+#include "vv_icons.h"
 #include "vv_strings.h"
 #include "vv_text.h"
 
@@ -55,10 +57,12 @@ static const vv_wrap_t WAITING_WRAP = { .line_px = CONTENT_W, .max_lines = 2,
 static struct {
     lv_obj_t *scr;
     // Top bar
-    lv_obj_t *pill, *pill_dot, *pill_label;
+    lv_obj_t *pill, *pill_dot, *pill_label, *pill_logo;
     lv_obj_t *batt_label, *batt_body, *batt_fill, *batt_nub;
-    // Centre page: rings + title + body, or passkey
+    // Centre page: rings + title + body, or passkey; in IDLE the Target app
+    // logo and conversation title replace the rings
     lv_obj_t *center, *ring_outer, *ring_mid, *core, *spinner, *title, *body, *passkey;
+    lv_obj_t *logo, *conv;
     // Dictation page
     lv_obj_t *dict, *rec_dot, *dict_title, *elapsed, *bars[METER_BARS], *partial;
     // Result page
@@ -66,6 +70,7 @@ static struct {
     // Picker page
     lv_obj_t *picker, *picker_title, *picker_pos, *picker_msg;
     lv_obj_t *rows[PICKER_ROWS], *row_label[PICKER_ROWS], *row_tag[PICKER_ROWS];
+    lv_obj_t *row_logo[PICKER_ROWS];
     // Bottom
     lv_obj_t *hint1, *hint2, *toast, *toast_label;
 
@@ -119,6 +124,13 @@ static lv_obj_t *text(lv_obj_t *parent, const lv_font_t *font, uint32_t color, i
     return label;
 }
 
+static lv_obj_t *image(lv_obj_t *parent, int x, int y) {
+    lv_obj_t *img = lv_image_create(parent);
+    lv_obj_set_pos(img, x, y);
+    lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
+    return img;
+}
+
 static void show(lv_obj_t *obj, bool visible) {
     if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
@@ -142,6 +154,8 @@ static void build_top_bar(void) {
     ui.pill_label = text(ui.pill, FONT_BODY, C_TEXT, 24, 2, 108, LV_TEXT_ALIGN_LEFT);
     lv_obj_set_height(ui.pill_label, 22);
     lv_label_set_long_mode(ui.pill_label, LV_LABEL_LONG_MODE_DOTS);
+
+    ui.pill_logo = image(ui.scr, 18, 13);
 
     ui.batt_label = text(ui.scr, FONT_BODY, C_MUTED, 160, 12, 36, LV_TEXT_ALIGN_RIGHT);
     ui.batt_body = box(ui.scr, 199, 17, 18, 11, C_BG, 3);
@@ -167,6 +181,12 @@ static void build_center(void) {
     lv_obj_set_style_arc_width(ui.spinner, 3, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(ui.spinner, lv_color_hex(C_MINT), LV_PART_INDICATOR);
     show(ui.spinner, false);
+
+    ui.logo = image(ui.center, cx - 48, cy - 48);
+    ui.conv = text(ui.center, FONT_BODY, C_TEXT, SIDE, 176, CONTENT_W, LV_TEXT_ALIGN_CENTER);
+    lv_obj_set_height(ui.conv, 22);
+    lv_label_set_long_mode(ui.conv, LV_LABEL_LONG_MODE_DOTS);
+    show(ui.conv, false);
 
     ui.title = text(ui.center, FONT_TITLE, C_TEXT, SIDE, 182, CONTENT_W, LV_TEXT_ALIGN_CENTER);
     ui.body = text(ui.center, FONT_BODY, C_MUTED, SIDE, 216, CONTENT_W, LV_TEXT_ALIGN_CENTER);
@@ -208,6 +228,7 @@ static void build_picker(void) {
     ui.picker_msg = text(ui.picker, FONT_BODY, C_MUTED, SIDE, 140, CONTENT_W, LV_TEXT_ALIGN_CENTER);
     for (int i = 0; i < PICKER_ROWS; i++) {
         ui.rows[i] = box(ui.picker, 16, 84 + i * ROW_H, SCREEN_W - 32, ROW_H - 4, C_BG, 10);
+        ui.row_logo[i] = image(ui.rows[i], 8, 5);
         ui.row_label[i] = text(ui.rows[i], FONT_BODY, C_TEXT, 12, 5, 132, LV_TEXT_ALIGN_LEFT);
         lv_obj_set_height(ui.row_label[i], 22);
         lv_label_set_long_mode(ui.row_label[i], LV_LABEL_LONG_MODE_DOTS);
@@ -249,6 +270,18 @@ void vv_ui_init(const char *device_name) {
 // ---------------------------------------------------------------------------
 // Rendering
 
+// Small logo before the pill while dictating, waiting or showing a result.
+static void render_pill_logo(const vv_app_t *app) {
+    int logo = vv_app_target_logo(app);
+    bool on = logo >= 0 && (app->state == VV_ST_DICTATING || app->state == VV_ST_WAITING ||
+                            app->state == VV_ST_RESULT);
+    if (on) lv_image_set_src(ui.pill_logo, vv_icons_20[logo]);
+    show(ui.pill_logo, on);
+    lv_obj_set_x(ui.pill, on ? 44 : 20);
+    lv_obj_set_width(ui.pill, on ? 116 : 140);
+    lv_obj_set_width(ui.pill_label, on ? 84 : 108);
+}
+
 static void render_target(const vv_app_t *app) {
     const char *label = app->target_known && app->target_label[0] ? app->target_label
                                                                   : VV_T_NO_TARGET;
@@ -274,6 +307,9 @@ static void center_mode(bool passkey) {
     show(ui.ring_outer, !passkey);
     show(ui.ring_mid, !passkey);
     show(ui.core, !passkey);
+    show(ui.logo, false);
+    show(ui.conv, false);
+    show(ui.title, true);
     show(ui.passkey, passkey);
     if (passkey) show(ui.spinner, false);
     lv_obj_set_y(ui.title, passkey ? 58 : 182);
@@ -352,13 +388,31 @@ static void render_result(const vv_app_t *app) {
     }
 }
 
+static const char *picker_title(uint8_t list) {
+    switch (list) {
+    case VV_LIST_ORCA: return VV_H_PICKER_ORCA;
+    case VV_APP_WECHAT + 1: return VV_H_PICKER_WECHAT;
+    case VV_APP_CHATGPT + 1: return VV_H_PICKER_CHATGPT;
+    case VV_APP_WECOM + 1: return VV_H_PICKER_WECOM;
+    default: return VV_H_PICKER_ROOT;
+    }
+}
+
 static void render_picker(const vv_app_t *app) {
-    lv_label_set_text(ui.picker_title,
-                      app->picker_list == VV_LIST_ORCA ? VV_H_PICKER_ORCA : VV_H_PICKER_ROOT);
+    lv_label_set_text(ui.picker_title, picker_title(app->picker_list));
     bool empty = !app->picker_loading && app->picker_count == 0;
-    show(ui.picker_msg, app->picker_loading || empty);
-    lv_label_set_text(ui.picker_msg, app->picker_loading ? VV_T_PICKER_LOADING : VV_T_PICKER_EMPTY);
-    if (app->picker_loading || empty) {
+    bool busy = app->picker_loading || app->picker_jumping;
+    const char *msg = VV_T_PICKER_LOADING;
+    if (app->picker_jumping) {
+        msg = VV_T_PICKER_JUMPING;
+    } else if (empty) {
+        msg = app->picker_list == VV_LIST_ROOT ? VV_T_PICKER_EMPTY
+              : (app->picker_parent_flags & VV_ITEM_NOT_RUNNING) ? VV_T_PICKER_NOT_RUN
+                                                                 : VV_T_PICKER_NO_CONV;
+    }
+    show(ui.picker_msg, busy || empty);
+    lv_label_set_text(ui.picker_msg, msg);
+    if (busy || empty) {
         lv_label_set_text(ui.picker_pos, "");
         for (int i = 0; i < PICKER_ROWS; i++) show(ui.rows[i], false);
         return;
@@ -380,6 +434,11 @@ static void render_picker(const vv_app_t *app) {
         set_bg(ui.rows[i], selected ? C_MINT : C_BG);
         lv_obj_set_style_border_width(ui.rows[i], selected ? 0 : 1, 0);
         lv_obj_set_style_border_color(ui.rows[i], lv_color_hex(C_SURFACE), 0);
+        int logo = vv_app_picker_logo(app, (uint8_t)index);
+        if (logo >= 0) lv_image_set_src(ui.row_logo[i], vv_icons_20[logo]);
+        show(ui.row_logo[i], logo >= 0);
+        lv_obj_set_x(ui.row_label[i], logo >= 0 ? 34 : 12);
+        lv_obj_set_width(ui.row_label[i], logo >= 0 ? 110 : 132);
         lv_label_set_text(ui.row_label[i], item->label);
         set_color(ui.row_label[i], selected ? C_ON_MINT : C_TEXT);
         const char *tag = "";
@@ -387,11 +446,11 @@ static void render_picker(const vv_app_t *app) {
         if (item->flags & VV_ITEM_NOT_RUNNING) {
             tag = VV_T_NOT_RUNNING;
             if (!selected) tag_color = C_AMBER;
+        } else if (item->flags & VV_ITEM_CURRENT) {
+            tag = "●";   // the Target's app / the Current Conversation
+            if (!selected) tag_color = C_MINT;
         } else if (item->flags & VV_ITEM_SUBLIST) {
             tag = "→";
-        } else if (item->flags & VV_ITEM_CURRENT) {
-            tag = "●";
-            if (!selected) tag_color = C_MINT;
         }
         lv_label_set_text(ui.row_tag[i], tag);
         set_color(ui.row_tag[i], tag_color);
@@ -411,6 +470,7 @@ static const char *toast_text(vv_toast_t toast, uint32_t *color) {
     case VV_TOAST_FAILED: *color = C_CORAL; return VV_T_ACTION_FAILED;
     case VV_TOAST_PAIR_FAILED: *color = C_CORAL; return VV_T_PAIR_FAILED;
     case VV_TOAST_LIST_FAILED: *color = C_AMBER; return VV_T_LIST_FAILED;
+    case VV_TOAST_JUMPED: *color = C_MINT; return VV_T_JUMPED;
     case VV_TOAST_NONE: break;
     }
     return NULL;
@@ -498,12 +558,27 @@ static void render_state(const vv_app_t *app) {
         lv_label_set_text(ui.body, VV_T_LINKING_HINT);
         set_color(ui.body, C_MUTED);
         break;
-    case VV_ST_IDLE:
+    case VV_ST_IDLE: {
         center_mode(false);
         set_orb(C_MINT, C_MINT, true, false);
         lv_label_set_text(ui.title, VV_H_IDLE);
+        int logo = vv_app_target_logo(app);
+        if (logo >= 0) {
+            // The Target app's logo and conversation replace the orb.
+            show(ui.ring_outer, false);
+            show(ui.ring_mid, false);
+            show(ui.core, false);
+            show(ui.title, false);
+            lv_image_set_src(ui.logo, vv_icons_96[logo]);
+            bool usable = app->target_status == VV_STATUS_OK;
+            lv_obj_set_style_image_opa(ui.logo, usable ? LV_OPA_COVER : LV_OPA_50, 0);
+            show(ui.logo, true);
+            lv_label_set_text(ui.conv, vv_app_target_title(app));
+            show(ui.conv, true);
+        }
         idle_body(app);
         break;
+    }
     case VV_ST_WAITING:
         center_mode(false);
         set_orb(C_MINT, C_MINT, false, true);
@@ -531,6 +606,7 @@ static void render_state(const vv_app_t *app) {
 
 void vv_ui_render(const vv_app_t *app, uint32_t dirty) {
     if (dirty & VV_DIRTY_TARGET) render_target(app);
+    if (dirty & (VV_DIRTY_STATE | VV_DIRTY_TARGET)) render_pill_logo(app);
     if (dirty & (VV_DIRTY_STATE | VV_DIRTY_STATUS | VV_DIRTY_TARGET)) {
         render_state(app);
     } else {

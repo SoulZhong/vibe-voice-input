@@ -98,10 +98,11 @@ bool vv_proto_decode(const uint8_t *data, size_t len, vv_msg_t *msg) {
         msg->d = data[4];
         return with_text(data, len, 5, msg);
     case VV_MSG_TARGET_STATE:
-        if (len < 3) return false;
+        if (len < 4) return false;
         msg->a = data[1];
         msg->b = data[2];
-        return with_text(data, len, 3, msg);
+        msg->c = data[3];
+        return with_text(data, len, 4, msg);
     default:
         return false;
     }

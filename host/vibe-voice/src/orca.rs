@@ -1,18 +1,28 @@
 //! Orca Sessions through the `orca` CLI.
 //!
+//! Orca's Current Conversation is the active leaf of the active tab in the
+//! worktree Orca's UI has selected: `orca worktree ps` marks that worktree
+//! `isActive` (`--worktree active` would mean the caller's working directory,
+//! not the UI), and `orca terminal list --include-visual-layouts` gives each
+//! worktree's tab and pane tree.
+//!
 //! Arguments are always passed as separate argv entries (never through a
 //! shell) and values use `--flag=value` so text starting with `-` cannot be
 //! mistaken for a flag. The process runner is a trait so tests never touch
 //! real terminals.
 
 use serde::Deserialize;
+use std::io::Read;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// One live Orca-managed terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrcaSession {
     pub handle: String,
     pub leaf_id: String,
+    /// Orca's worktree id (`<repo-id>::<path>`).
+    pub worktree_id: String,
     /// Worktree display name (last path component of the worktree path).
     pub worktree: String,
     /// Terminal title with leading status glyphs removed.
@@ -74,6 +84,8 @@ struct RawTerminal {
     handle: String,
     #[serde(default)]
     leaf_id: String,
+    #[serde(default)]
+    worktree_id: String,
     #[serde(default)]
     worktree_path: String,
     #[serde(default)]
@@ -162,8 +174,154 @@ pub fn parse_list(stdout: &str) -> Result<Vec<OrcaSession>, OrcaError> {
             title: clean_title(&t.title),
             handle: t.handle,
             leaf_id: t.leaf_id,
+            worktree_id: t.worktree_id,
         })
         .collect())
+}
+
+/// Live Orca Sessions, ordered for the Device: the Current Conversation
+/// first, then the rest of the active worktree, then the other worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrcaSnapshot {
+    pub sessions: Vec<OrcaSession>,
+    /// Whether `sessions[0]` is the Current Conversation.
+    pub has_current: bool,
+    /// The worktree Orca's UI has selected, if any.
+    pub active_worktree: Option<String>,
+}
+
+impl OrcaSnapshot {
+    pub fn current(&self) -> Option<&OrcaSession> {
+        self.sessions.first().filter(|_| self.has_current)
+    }
+}
+
+/// The worktree id `orca worktree ps --json` marks `isActive`.
+pub fn parse_active_worktree(stdout: &str) -> Result<Option<String>, OrcaError> {
+    let result = check_envelope(stdout, true, "")?
+        .ok_or_else(|| OrcaError::Unavailable("unexpected worktree reply".into()))?;
+    Ok(result
+        .get("worktrees")
+        .and_then(|w| w.as_array())
+        .into_iter()
+        .flatten()
+        .find(|w| w.get("isActive").and_then(|a| a.as_bool()) == Some(true))
+        .and_then(|w| w.get("worktreeId").and_then(|i| i.as_str()))
+        .map(str::to_owned))
+}
+
+fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(|x| x.as_str())
+}
+
+/// First tab group of a layout tree (groups can be split side by side; the
+/// CLI does not say which group has focus, so the first one wins).
+fn first_group(node: &serde_json::Value) -> Option<&serde_json::Value> {
+    if str_field(node, "type") == Some("group") || node.get("tabs").is_some() {
+        return Some(node);
+    }
+    ["first", "second"]
+        .iter()
+        .filter_map(|k| node.get(*k))
+        .chain(
+            node.get("children")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten(),
+        )
+        .find_map(first_group)
+}
+
+/// Terminal leaves of a pane tree, in order.
+fn terminals<'a>(node: &'a serde_json::Value, out: &mut Vec<&'a serde_json::Value>) {
+    if str_field(node, "type") == Some("terminal") || node.get("handle").is_some() {
+        out.push(node);
+        return;
+    }
+    for k in ["first", "second"] {
+        if let Some(n) = node.get(k) {
+            terminals(n, out);
+        }
+    }
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for n in children {
+            terminals(n, out);
+        }
+    }
+}
+
+/// Handle of the active leaf in the active tab of a visual layout `root`.
+pub fn active_leaf_handle(root: &serde_json::Value) -> Option<String> {
+    let group = first_group(root)?;
+    let tabs = group.get("tabs")?.as_array()?;
+    let active_tab = str_field(group, "activeTabId");
+    let tab = tabs
+        .iter()
+        .find(|t| active_tab.is_some() && str_field(t, "tabId") == active_tab)
+        .or_else(|| tabs.first())?;
+    let mut leaves = Vec::new();
+    terminals(tab.get("panes")?, &mut leaves);
+    let active_leaf = str_field(tab, "activeLeafId");
+    let leaf = leaves
+        .iter()
+        .find(|l| active_leaf.is_some() && str_field(l, "leafId") == active_leaf)
+        .or_else(|| {
+            leaves
+                .iter()
+                .find(|l| l.get("active").and_then(|a| a.as_bool()) == Some(true))
+        })
+        .or_else(|| leaves.first())?;
+    str_field(leaf, "handle").map(str::to_owned)
+}
+
+/// Build the ordered snapshot from `orca worktree ps --json` (the active
+/// worktree; `None` when that call failed) and
+/// `orca terminal list --json --include-visual-layouts`.
+pub fn parse_snapshot(
+    active_worktree: Option<String>,
+    list_stdout: &str,
+) -> Result<OrcaSnapshot, OrcaError> {
+    let sessions = parse_list(list_stdout)?;
+    let Some(active) = active_worktree else {
+        return Ok(OrcaSnapshot {
+            sessions,
+            has_current: false,
+            active_worktree: None,
+        });
+    };
+    let layout_handle = serde_json::from_str::<serde_json::Value>(list_stdout.trim())
+        .ok()
+        .and_then(|v| {
+            v.get("result")?
+                .get("visualLayouts")?
+                .as_array()?
+                .iter()
+                .find(|l| str_field(l, "worktreeId") == Some(active.as_str()))
+                .and_then(|l| active_leaf_handle(l.get("root")?))
+        });
+    let in_active = |s: &OrcaSession| s.worktree_id == active;
+    // Layout first; without one, the first writable terminal of the worktree.
+    let current = layout_handle
+        .and_then(|h| sessions.iter().position(|s| s.handle == h && in_active(s)))
+        .or_else(|| sessions.iter().position(in_active));
+    let mut ordered = Vec::with_capacity(sessions.len());
+    if let Some(i) = current {
+        ordered.push(sessions[i].clone());
+    }
+    for pass_active in [true, false] {
+        ordered.extend(
+            sessions
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| Some(*i) != current && in_active(s) == pass_active)
+                .map(|(_, s)| s.clone()),
+        );
+    }
+    Ok(OrcaSnapshot {
+        sessions: ordered,
+        has_current: current.is_some(),
+        active_worktree: Some(active),
+    })
 }
 
 /// Text for a terminal: line breaks would submit the prompt, so they become
@@ -184,9 +342,14 @@ pub struct CmdOutput {
     pub stderr: String,
 }
 
-/// Runs the `orca` CLI with the given arguments.
+/// Longest wait for an ordinary CLI call.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest wait for `orca open` (launch Orca and wait for its runtime).
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Runs the `orca` CLI with the given arguments, killing it after `timeout`.
 pub trait CommandRunner: Send {
-    fn run(&mut self, args: &[String]) -> std::io::Result<CmdOutput>;
+    fn run(&mut self, args: &[String], timeout: Duration) -> std::io::Result<CmdOutput>;
 }
 
 /// Real runner: spawns the CLI directly (no shell).
@@ -216,28 +379,62 @@ impl ProcessRunner {
     }
 }
 
+fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
 impl CommandRunner for ProcessRunner {
-    fn run(&mut self, args: &[String]) -> std::io::Result<CmdOutput> {
+    fn run(&mut self, args: &[String], timeout: Duration) -> std::io::Result<CmdOutput> {
+        use std::process::Stdio;
         let mut cmd = std::process::Command::new(&self.program);
-        cmd.args(args).stdin(std::process::Stdio::null());
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // Finder-launched apps lack /usr/local/bin; the CLI script needs `env bash`.
         let path = std::env::var("PATH").unwrap_or_default();
         cmd.env(
             "PATH",
             format!("{path}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"),
         );
-        let out = cmd.output()?;
+        let mut child = cmd.spawn()?;
+        let out = drain(child.stdout.take());
+        let err = drain(child.stderr.take());
+        let start = Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("orca {} timed out", args.first().map_or("", |a| a)),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         Ok(CmdOutput {
-            success: out.status.success(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: status.success(),
+            stdout: String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned(),
+            stderr: String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned(),
         })
     }
 }
 
 /// Orca operations the session logic needs.
 pub trait OrcaApi {
-    fn list(&mut self) -> Result<Vec<OrcaSession>, OrcaError>;
+    /// Live sessions with the Current Conversation first.
+    fn snapshot(&mut self) -> Result<OrcaSnapshot, OrcaError>;
+    /// Launch Orca and wait (bounded) until its runtime answers.
+    fn open(&mut self) -> Result<(), OrcaError>;
     fn send_text(&mut self, handle: &str, text: &str) -> Result<(), OrcaError>;
     fn send_enter(&mut self, handle: &str) -> Result<(), OrcaError>;
     fn send_backspaces(&mut self, handle: &str, count: usize) -> Result<(), OrcaError>;
@@ -262,11 +459,29 @@ impl<R: CommandRunner> OrcaClient<R> {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+        self.call_with(args, CALL_TIMEOUT)
+    }
+
+    fn call_with(
+        &mut self,
+        args: Vec<String>,
+        timeout: Duration,
+    ) -> Result<Option<serde_json::Value>, OrcaError> {
+        let out = self.run_raw(&args, timeout)?;
+        check_envelope(&out.stdout, out.success, &out.stderr)
+    }
+
+    fn run_raw(&mut self, args: &[String], timeout: Duration) -> Result<CmdOutput, OrcaError> {
         let out = self
             .runner
-            .run(&args)
+            .run(args, timeout)
             .map_err(|e| OrcaError::Unavailable(format!("cannot run orca: {e}")))?;
-        check_envelope(&out.stdout, out.success, &out.stderr)
+        if !out.success && serde_json::from_str::<serde_json::Value>(out.stdout.trim()).is_err() {
+            return Err(OrcaError::Unavailable(
+                out.stderr.trim().chars().take(200).collect(),
+            ));
+        }
+        Ok(out)
     }
 
     fn send(&mut self, handle: &str, text: Option<&str>, enter: bool) -> Result<(), OrcaError> {
@@ -287,18 +502,32 @@ impl<R: CommandRunner> OrcaClient<R> {
 }
 
 impl<R: CommandRunner> OrcaApi for OrcaClient<R> {
-    fn list(&mut self) -> Result<Vec<OrcaSession>, OrcaError> {
-        let args = vec!["terminal".into(), "list".into(), "--json".into()];
-        let out = self
-            .runner
-            .run(&args)
-            .map_err(|e| OrcaError::Unavailable(format!("cannot run orca: {e}")))?;
-        if !out.success && serde_json::from_str::<serde_json::Value>(out.stdout.trim()).is_err() {
-            return Err(OrcaError::Unavailable(
-                out.stderr.trim().chars().take(200).collect(),
-            ));
-        }
-        parse_list(&out.stdout)
+    fn snapshot(&mut self) -> Result<OrcaSnapshot, OrcaError> {
+        let ps: Vec<String> = ["worktree", "ps", "--limit=500", "--json"]
+            .map(String::from)
+            .into();
+        let out = self.run_raw(&ps, CALL_TIMEOUT)?;
+        let active = parse_active_worktree(&out.stdout).unwrap_or_else(|e| {
+            log::warn!("orca worktree ps: {e}");
+            None
+        });
+        let list: Vec<String> = [
+            "terminal",
+            "list",
+            "--limit=500",
+            "--include-visual-layouts",
+            "--json",
+        ]
+        .map(String::from)
+        .into();
+        let out = self.run_raw(&list, CALL_TIMEOUT)?;
+        parse_snapshot(active, &out.stdout)
+    }
+
+    fn open(&mut self) -> Result<(), OrcaError> {
+        log::info!("launching Orca (orca open)");
+        self.call_with(vec!["open".into(), "--json".into()], OPEN_TIMEOUT)
+            .map(|_| ())
     }
 
     fn send_text(&mut self, handle: &str, text: &str) -> Result<(), OrcaError> {
@@ -397,6 +626,114 @@ mod tests {
         assert_eq!(s[2].label(), "AxiomOS-rel · Terminal 1");
     }
 
+    // Shape captured from `orca terminal list --json --include-visual-layouts`
+    // (Orca CLI 1.4.218), anonymised; wt-b has a split group and a split pane.
+    const LAYOUT_JSON: &str = r#"{
+      "ok": true,
+      "result": {
+        "terminals": [
+          {"handle": "t_a1", "worktreeId": "r1::/src/wt-a", "worktreePath": "/src/wt-a",
+           "tabId": "tab-a1", "leafId": "leaf-a1", "title": "✳ 修复测试",
+           "connected": true, "writable": true, "orphaned": false},
+          {"handle": "t_b1", "worktreeId": "r2::/src/wt-b", "worktreePath": "/src/wt-b",
+           "tabId": "tab-b1", "leafId": "leaf-b1", "title": "Setup",
+           "connected": true, "writable": true, "orphaned": false},
+          {"handle": "t_b2", "worktreeId": "r2::/src/wt-b", "worktreePath": "/src/wt-b",
+           "tabId": "tab-b2", "leafId": "leaf-b2", "title": "◐ 语音输入",
+           "connected": true, "writable": true, "orphaned": false},
+          {"handle": "t_b3", "worktreeId": "r2::/src/wt-b", "worktreePath": "/src/wt-b",
+           "tabId": "tab-b2", "leafId": "leaf-b3", "title": "server",
+           "connected": true, "writable": true, "orphaned": false},
+          {"handle": "t_c1", "worktreeId": "r3::/src/wt-c", "worktreePath": "/src/wt-c",
+           "tabId": "tab-c1", "leafId": "leaf-c1", "title": "Terminal 1",
+           "connected": true, "writable": true, "orphaned": false}
+        ],
+        "visualLayouts": [
+          {"worktreeId": "r1::/src/wt-a", "worktreePath": "/src/wt-a",
+           "root": {"type": "group", "groupId": "g1", "activeTabId": "tab-a1", "tabs": [
+             {"tabId": "tab-a1", "title": "修复测试", "activeLeafId": "leaf-a1",
+              "panes": {"type": "terminal", "handle": "t_a1", "tabId": "tab-a1",
+                        "leafId": "leaf-a1", "title": "✳ 修复测试", "connected": true, "active": true}}]}},
+          {"worktreeId": "r2::/src/wt-b", "worktreePath": "/src/wt-b",
+           "root": {"type": "split", "direction": "horizontal",
+             "first": {"type": "group", "groupId": "g2", "activeTabId": "tab-b2", "tabs": [
+               {"tabId": "tab-b1", "title": "Setup", "activeLeafId": "leaf-b1",
+                "panes": {"type": "terminal", "handle": "t_b1", "leafId": "leaf-b1", "active": true}},
+               {"tabId": "tab-b2", "title": "语音输入", "activeLeafId": "leaf-b3",
+                "panes": {"type": "pane-split", "direction": "vertical",
+                  "first": {"type": "terminal", "handle": "t_b2", "leafId": "leaf-b2", "active": false},
+                  "second": {"type": "terminal", "handle": "t_b3", "leafId": "leaf-b3", "active": true}}}]},
+             "second": {"type": "group", "groupId": "g3", "activeTabId": "tab-x", "tabs": []}}}
+        ],
+        "totalCount": 5,
+        "truncated": false
+      }
+    }"#;
+
+    const PS_JSON: &str = r#"{"ok": true, "result": {"worktrees": [
+      {"worktreeId": "r1::/src/wt-a", "path": "/src/wt-a", "isActive": false},
+      {"worktreeId": "r2::/src/wt-b", "path": "/src/wt-b", "isActive": true}
+    ]}}"#;
+
+    fn handles(s: &OrcaSnapshot) -> Vec<&str> {
+        s.sessions.iter().map(|x| x.handle.as_str()).collect()
+    }
+
+    #[test]
+    fn current_conversation_from_active_worktree_layout() {
+        let active = parse_active_worktree(PS_JSON).unwrap();
+        assert_eq!(active.as_deref(), Some("r2::/src/wt-b"));
+        let s = parse_snapshot(active, LAYOUT_JSON).unwrap();
+        // Active tab tab-b2, active leaf leaf-b3 inside a split pane.
+        assert_eq!(s.current().unwrap().handle, "t_b3");
+        assert_eq!(s.current().unwrap().label(), "wt-b · server");
+        // Current first, then the rest of wt-b, then the others in list order.
+        assert_eq!(handles(&s), ["t_b3", "t_b1", "t_b2", "t_a1", "t_c1"]);
+    }
+
+    #[test]
+    fn current_conversation_fallbacks() {
+        // Active worktree without layout: its first writable terminal.
+        let s = parse_snapshot(Some("r3::/src/wt-c".into()), LAYOUT_JSON).unwrap();
+        assert_eq!(handles(&s)[0], "t_c1");
+        assert!(s.has_current);
+        // Layout names a handle that is not usable: first terminal of the worktree.
+        let no_layout = LAYOUT_JSON.replace(
+            "\"handle\": \"t_b3\", \"leafId\"",
+            "\"handle\": \"t_gone\", \"leafId\"",
+        );
+        let s = parse_snapshot(Some("r2::/src/wt-b".into()), &no_layout).unwrap();
+        assert_eq!(s.current().unwrap().handle, "t_b1");
+        // No active worktree, or one without terminals: no Current Conversation.
+        let s = parse_snapshot(None, LAYOUT_JSON).unwrap();
+        assert!(s.current().is_none());
+        assert_eq!(handles(&s), ["t_a1", "t_b1", "t_b2", "t_b3", "t_c1"]);
+        let s = parse_snapshot(Some("r9::/nowhere".into()), LAYOUT_JSON).unwrap();
+        assert!(s.current().is_none());
+        assert_eq!(
+            parse_active_worktree(
+                r#"{"ok":true,"result":{"worktrees":[{"worktreeId":"x","isActive":false}]}}"#
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn layout_walk_defaults() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"type":"group","activeTabId":"missing","tabs":[
+                {"tabId":"t1","panes":{"type":"pane-split",
+                  "first":{"type":"terminal","handle":"h1","leafId":"l1","active":false},
+                  "second":{"type":"terminal","handle":"h2","leafId":"l2","active":true}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(active_leaf_handle(&v).as_deref(), Some("h2"));
+        assert_eq!(
+            active_leaf_handle(&serde_json::json!({"type":"group","tabs":[]})),
+            None
+        );
+    }
+
     #[test]
     fn list_errors() {
         assert_eq!(
@@ -433,7 +770,7 @@ mod tests {
     }
 
     impl CommandRunner for Mock {
-        fn run(&mut self, args: &[String]) -> std::io::Result<CmdOutput> {
+        fn run(&mut self, args: &[String], _: Duration) -> std::io::Result<CmdOutput> {
             self.calls.lock().unwrap().push(args.to_vec());
             let (success, stdout) = self.reply.lock().unwrap().clone();
             Ok(CmdOutput {
@@ -446,7 +783,7 @@ mod tests {
 
     struct Missing;
     impl CommandRunner for Missing {
-        fn run(&mut self, _: &[String]) -> std::io::Result<CmdOutput> {
+        fn run(&mut self, _: &[String], _: Duration) -> std::io::Result<CmdOutput> {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "orca"))
         }
     }
@@ -462,8 +799,10 @@ mod tests {
         c.send_backspaces("term_1", 3).unwrap();
         c.send_backspaces("term_1", 0).unwrap();
         c.switch("term_1").unwrap();
+        c.open().unwrap();
         let calls = mock.calls.lock().unwrap();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[4], ["open", "--json"]);
         assert_eq!(
             calls[0],
             [
@@ -502,7 +841,8 @@ mod tests {
         let mut c = OrcaClient::new(mock);
         assert_eq!(c.send_text("term_x", "hi"), Err(OrcaError::Stale));
         let mut m = OrcaClient::new(Missing);
-        assert!(matches!(m.list(), Err(OrcaError::Unavailable(_))));
+        assert!(matches!(m.snapshot(), Err(OrcaError::Unavailable(_))));
+        assert!(matches!(m.open(), Err(OrcaError::Unavailable(_))));
         assert!(matches!(m.send_enter("t"), Err(OrcaError::Unavailable(_))));
     }
 }

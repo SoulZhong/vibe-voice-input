@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Generate and check the Vibe Voice app logos (LVGL 9 RGB565A8 images).
+
+The Device shows the logo of the Supported App the Target is in. The logos
+are the icons of the apps installed on this Mac, rasterized with macOS `sips`
+and converted to LVGL image descriptors:
+
+    python3 tools/vibe_icons.py generate    # macOS with the four apps installed
+    python3 tools/vibe_icons.py check       # offline, part of --static
+
+`generate` reads each app's Info.plist (CFBundleIconFile), rasterizes the
+.icns with `sips`, decodes the PNG (no third-party modules) and writes
+assets/icons/vibe-voice/vv_icons.c and vv_icons.h. The app order is the
+protocol's Supported App order (TARGET_STATE `app`, root picker rows).
+"""
+
+from __future__ import annotations
+
+import argparse
+import plistlib
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT_DIR = ROOT / "assets" / "icons" / "vibe-voice"
+SOURCE = OUT_DIR / "vv_icons.c"
+HEADER = OUT_DIR / "vv_icons.h"
+
+# (C name, app bundle) in Supported App order: 0 Orca, 1 WeChat, 2 ChatGPT, 3 WeCom.
+APPS = (
+    ("orca", "/Applications/Orca.app"),
+    ("wechat", "/Applications/WeChat.app"),
+    ("chatgpt", "/Applications/ChatGPT.app"),
+    ("wecom", "/Applications/企业微信.app"),
+)
+SIZES = (96, 20)
+
+LV_COLOR_FORMAT_RGB565A8 = 0x14
+LV_IMAGE_HEADER_MAGIC = 0x19
+
+
+def icon_file(app: Path) -> Path:
+    with (app / "Contents" / "Info.plist").open("rb") as f:
+        info = plistlib.load(f)
+    name = info.get("CFBundleIconFile") or "AppIcon"
+    if not name.endswith(".icns"):
+        name += ".icns"
+    path = app / "Contents" / "Resources" / name
+    if not path.is_file():
+        raise SystemExit(f"{app}: icon {name} not found")
+    return path
+
+
+def rasterize(icns: Path, size: int, out: Path) -> None:
+    subprocess.run(
+        ["sips", "-s", "format", "png", "-z", str(size), str(size), str(icns), "--out", str(out)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def decode_png(data: bytes) -> tuple[int, int, list[tuple[int, int, int, int]]]:
+    """Decode an 8-bit RGB/RGBA, non-interlaced PNG to RGBA pixels."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat = 8, b""
+    width = height = 0
+    channels = 0
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or interlace != 0 or color not in (2, 6):
+                raise ValueError(f"unsupported PNG (depth {depth}, color {color})")
+            channels = 4 if color == 6 else 3
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+    raw = zlib.decompress(idat)
+    stride = width * channels
+    rows: list[bytearray] = []
+    prev = bytearray(stride)
+    for y in range(height):
+        start = y * (stride + 1)
+        kind = raw[start]
+        line = bytearray(raw[start + 1:start + 1 + stride])
+        for i in range(stride):
+            left = line[i - channels] if i >= channels else 0
+            up = prev[i]
+            up_left = prev[i - channels] if i >= channels else 0
+            if kind == 1:
+                line[i] = (line[i] + left) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + up) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + ((left + up) >> 1)) & 0xFF
+            elif kind == 4:
+                p = left + up - up_left
+                pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
+                pred = left if pa <= pb and pa <= pc else (up if pb <= pc else up_left)
+                line[i] = (line[i] + pred) & 0xFF
+        rows.append(line)
+        prev = line
+    pixels = []
+    for line in rows:
+        for x in range(width):
+            px = line[x * channels:(x + 1) * channels]
+            pixels.append((px[0], px[1], px[2], px[3] if channels == 4 else 255))
+    return width, height, pixels
+
+
+def rgb565a8(pixels: list[tuple[int, int, int, int]]) -> bytes:
+    """LVGL RGB565A8: little-endian RGB565 plane, then an 8-bit alpha plane."""
+    color = bytearray()
+    alpha = bytearray()
+    for r, g, b, a in pixels:
+        if a == 0:
+            r = g = b = 0
+        value = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        color += struct.pack("<H", value)
+        alpha.append(a)
+    return bytes(color + alpha)
+
+
+def c_array(data: bytes) -> str:
+    lines = []
+    for i in range(0, len(data), 16):
+        lines.append("    " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) + ",")
+    return "\n".join(lines)
+
+
+def render(images: dict[tuple[str, int], bytes]) -> tuple[str, str]:
+    header = [
+        "// Generated by tools/vibe_icons.py -- do not edit.",
+        "// App logos for the Vibe Voice Device; see assets/icons/vibe-voice/README.md.",
+        "#pragma once",
+        "",
+        '#include "lvgl.h"',
+        "",
+        "#define VV_ICON_COUNT 4",
+        "",
+        "// Index = Supported App (TARGET_STATE app): 0 Orca, 1 WeChat, 2 ChatGPT, 3 WeCom.",
+    ]
+    for size in SIZES:
+        header.append(f"extern const lv_image_dsc_t *const vv_icons_{size}[VV_ICON_COUNT];")
+    source = [
+        "// Generated by tools/vibe_icons.py -- do not edit.",
+        "// App icons extracted from the locally installed apps; trademarks of their owners.",
+        '#include "vv_icons.h"',
+        "",
+    ]
+    for (name, size), data in images.items():
+        ident = f"vv_icon_{name}_{size}"
+        source += [
+            f"static LV_ATTRIBUTE_LARGE_CONST const uint8_t {ident}_map[] = {{",
+            c_array(data),
+            "};",
+            "",
+            f"static const lv_image_dsc_t {ident} = {{",
+            "    .header.magic = LV_IMAGE_HEADER_MAGIC,",
+            "    .header.cf = LV_COLOR_FORMAT_RGB565A8,",
+            f"    .header.w = {size},",
+            f"    .header.h = {size},",
+            f"    .header.stride = {size * 2},",
+            f"    .data_size = sizeof({ident}_map),",
+            f"    .data = {ident}_map,",
+            "};",
+            "",
+        ]
+    for size in SIZES:
+        refs = ", ".join(f"&vv_icon_{name}_{size}" for name, _ in APPS)
+        source.append(f"const lv_image_dsc_t *const vv_icons_{size}[VV_ICON_COUNT] = {{ {refs} }};")
+    return "\n".join(header) + "\n", "\n".join(source) + "\n"
+
+
+def generate() -> int:
+    images: dict[tuple[str, int], bytes] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, app in APPS:
+            icns = icon_file(Path(app))
+            for size in SIZES:
+                png = Path(tmp) / f"{name}-{size}.png"
+                rasterize(icns, size, png)
+                w, h, pixels = decode_png(png.read_bytes())
+                if (w, h) != (size, size):
+                    raise SystemExit(f"{icns}: got {w}x{h}, want {size}x{size}")
+                images[(name, size)] = rgb565a8(pixels)
+                print(f"{name} {size}x{size} <- {icns}")
+    header, source = render(images)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    HEADER.write_text(header, encoding="utf-8")
+    SOURCE.write_text(source, encoding="utf-8")
+    total = sum(len(d) for d in images.values())
+    print(f"wrote {SOURCE.relative_to(ROOT)} ({total} bytes of image data)")
+    return 0
+
+
+ARRAY_RE = re.compile(r"const uint8_t (vv_icon_(\w+?)_(\d+))_map\[\] = \{(.*?)\};", re.S)
+
+
+def check() -> int:
+    errors = []
+    if not SOURCE.is_file() or not HEADER.is_file():
+        print(f"vibe_icons: missing {SOURCE.relative_to(ROOT)} or vv_icons.h", file=sys.stderr)
+        return 1
+    text = SOURCE.read_text(encoding="utf-8")
+    found = {}
+    for match in ARRAY_RE.finditer(text):
+        _, name, size, body = match.groups()
+        count = len(re.findall(r"0x[0-9a-f]{2}", body))
+        found[(name, int(size))] = count
+    for name, _ in APPS:
+        for size in SIZES:
+            want = size * size * 3
+            got = found.get((name, size))
+            if got != want:
+                errors.append(f"{name} {size}px: {got} bytes, want {want}")
+    for size in SIZES:
+        refs = ", ".join(f"&vv_icon_{name}_{size}" for name, _ in APPS)
+        if f"vv_icons_{size}[VV_ICON_COUNT] = {{ {refs} }};" not in text:
+            errors.append(f"vv_icons_{size} is not in Supported App order")
+    for e in errors:
+        print(f"vibe_icons: {e}", file=sys.stderr)
+    if not errors:
+        total = sum(found.values())
+        print(f"vibe_icons: {len(found)} images, {total} bytes, Supported App order OK")
+    return 1 if errors else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("command", choices=("generate", "check"))
+    args = parser.parse_args()
+    return generate() if args.command == "generate" else check()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

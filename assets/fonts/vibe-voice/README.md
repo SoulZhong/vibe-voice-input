@@ -12,7 +12,7 @@ covers the whole GB2312 set instead of only the fixed UI strings.
 | File | Size / depth | Source face | Coverage | Flash |
 | --- | --- | --- | --- | --- |
 | `vv_font_body_16.c` | 16 px, 4 bpp, uncompressed | Noto Sans SC Regular | All of GB2312 (6763 hanzi + its symbols, kana, Greek, Cyrillic, box drawing), ASCII `0x20-0x7E`, Latin-1 `0xA0-0xFF`, general punctuation `0x2010-0x2027` and `0x2030-0x203A`, CJK punctuation `0x3000-0x301F`, fullwidth forms `0xFF01-0xFF5E` and `0xFFE0-0xFFE6`: 7648 glyphs, line height 21 px | ~958 KiB |
-| `vv_font_title_24.c` | 24 px, 4 bpp | Noto Sans SC Medium | ASCII plus the characters of every `VV_H_*` title in `main/vv_strings.h` (136 glyphs); falls back to the body font | ~23 KiB |
+| `vv_font_title_24.c` | 24 px, 4 bpp | Noto Sans SC Medium | ASCII plus the characters of every `VV_H_*` title in `main/vv_strings.h` (140 glyphs); falls back to the body font | ~23 KiB |
 | `vv_font_digits_48.c` | 48 px, 4 bpp | Noto Sans SC Medium | `0-9` and space, for the pairing passkey; falls back to the title font | ~4.4 KiB |
 
 Fallback chain: digits 48 → title 24 → body 16. A code point outside the body

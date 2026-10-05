@@ -47,7 +47,7 @@ static void connect_ready(void) {
     link_event(VV_LINK_SECURE, 0);
     assert(app.state == VV_ST_LINKING && app.passkey == 0);
     // Frames before READY (notifications not enabled) are ignored.
-    const uint8_t ack[] = { 0x81, 1 };
+    const uint8_t ack[] = { 0x81, VV_PROTO_VERSION };
     frame(ack, sizeof(ack));
     assert(app.state == VV_ST_LINKING);
     link_event(VV_LINK_READY, 0);
@@ -60,9 +60,10 @@ static void connect_ready(void) {
     assert(act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_HELLO);
     frame(ack, sizeof(ack));
     assert(app.state == VV_ST_IDLE && !app.version_mismatch);
-    const uint8_t target[] = { 0xB2, 0, 1, 'W', 'e', 'C', 'h', 'a', 't' };
+    const uint8_t target[] = { 0xB2, 0, 1, VV_APP_WECHAT, 'W', 'e', 'C', 'h', 'a', 't' };
     frame(target, sizeof(target));
     assert(app.target_known && strcmp(app.target_label, "WeChat") == 0);
+    assert(app.target_app == VV_APP_WECHAT);
     (void)vv_app_take_dirty(&app);
 }
 
@@ -214,7 +215,7 @@ static void test_disconnect_abandons(void) {
     assert(sent(VV_MSG_HELLO));
     link_event(VV_LINK_READY, 0);
     assert(act.frame_count == 0);   // duplicate READY does not re-send
-    const uint8_t ack2[] = { 0x81, 2 };
+    const uint8_t ack2[] = { 0x81, 1 };   // a v1 Companion
     frame(ack2, sizeof(ack2));
     assert(app.state == VV_ST_IDLE && app.version_mismatch);
 
@@ -235,6 +236,29 @@ static void item(uint8_t list, uint8_t index, uint8_t count, uint8_t flags, cons
     frame(data, 5 + n);
 }
 
+static void end_list(uint8_t list, uint8_t count) {
+    const uint8_t end[] = { 0xB1, list, count };
+    frame(end, sizeof(end));
+}
+
+static void target_state(uint8_t status, uint8_t kind, uint8_t app_index, const char *label) {
+    uint8_t data[96] = { 0xB2, status, kind, app_index };
+    size_t n = strlen(label);
+    memcpy(&data[4], label, n);
+    frame(data, 4 + n);
+}
+
+// Root list: the four Supported Apps, each opening a sub-list.
+static void root_list(uint8_t current) {
+    static const char *const names[] = { "Orca", "WeChat", "ChatGPT", "WeCom" };
+    for (uint8_t i = 0; i < 4; i++) {
+        uint8_t flags = VV_ITEM_SUBLIST | (i == current ? VV_ITEM_CURRENT : 0) |
+                        (i >= 2 ? VV_ITEM_NOT_RUNNING : 0);
+        item(0, i, 4, flags, names[i]);
+    }
+    end_list(0, 4);
+}
+
 static void test_picker(void) {
     connect_ready();
     press(VV_BTN_OK, VV_PRESS_LONG);
@@ -245,64 +269,133 @@ static void test_picker(void) {
     assert(act.frame_count == 0);
     item(1, 0, 3, 0, "wrong list");
     assert(app.picker_count == 0);
-    item(0, 0, 3, 0, "Follow");
-    item(0, 1, 3, VV_ITEM_CURRENT | VV_ITEM_NOT_RUNNING, "WeChat");
-    item(0, 2, 3, VV_ITEM_SUBLIST, "Orca");
-    const uint8_t end[] = { 0xB1, 0, 3 };
-    frame(end, sizeof(end));
-    assert(!app.picker_loading && app.picker_count == 3 && app.picker_cursor == 1);
+    root_list(VV_APP_WECHAT);
+    assert(!app.picker_loading && app.picker_count == 4 && app.picker_cursor == 1);
+    // Root rows map to the Supported App logos; sub-lists have none.
+    assert(vv_app_picker_logo(&app, 0) == VV_APP_ORCA);
+    assert(vv_app_picker_logo(&app, 3) == VV_APP_WECOM);
+    assert(vv_app_picker_logo(&app, 4) == -1);
 
     press(VV_BTN_DOWN, VV_PRESS_CLICK);
     assert(app.picker_cursor == 2);
-    press(VV_BTN_DOWN, VV_PRESS_CLICK);
+    press(VV_BTN_DOWN, VV_PRESS_DOUBLE);
     assert(app.picker_cursor == 0);              // wraps
     press(VV_BTN_UP, VV_PRESS_CLICK);
-    assert(app.picker_cursor == 2);
-    press(VV_BTN_UP, VV_PRESS_DOUBLE);
-    assert(app.picker_cursor == 0);
+    assert(app.picker_cursor == 3);
 
-    // Item with a sub-list opens the Orca Sessions list.
-    press(VV_BTN_UP, VV_PRESS_CLICK);
+    // OK on root row n opens list n + 1 (here 1 = Orca, which may launch:
+    // the longer timeout applies).
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);
     press(VV_BTN_OK, VV_PRESS_CLICK);
     assert(app.picker_list == 1 && app.picker_loading);
     assert(act.frames[0].data[0] == VV_MSG_TARGETS_REQ && act.frames[0].data[1] == 1);
-    item(1, 0, 2, 0, "shell-1");
-    item(1, 1, 2, 0, "shell-2");
-    const uint8_t end1[] = { 0xB1, 1, 2 };
-    frame(end1, sizeof(end1));
+    assert(vv_app_picker_logo(&app, 0) == -1);
+    tick(VV_PICKER_TIMEOUT_MS);
+    assert(app.state == VV_ST_PICKER && app.picker_loading);
+    item(1, 0, 3, 0, "wt-a · build");
+    item(1, 1, 3, VV_ITEM_CURRENT, "wt-b · voice");
+    item(1, 2, 3, 0, "wt-c · docs");
+    end_list(1, 3);
+    assert(app.picker_cursor == 1);              // cursor on the Current Conversation
+    assert(vv_app_picker_logo(&app, 0) == -1);
+
+    // Jump: TARGET_SELECT, wait, close on TARGET_STATE with a toast.
     press(VV_BTN_DOWN, VV_PRESS_CLICK);
     press(VV_BTN_OK, VV_PRESS_CLICK);
-    assert(app.state == VV_ST_IDLE);
     assert(act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_TARGET_SELECT);
-    assert(act.frames[0].data[1] == 1 && act.frames[0].data[2] == 1);
-
-    // Long OK backs out of the sub-list, then closes the picker.
-    press(VV_BTN_OK, VV_PRESS_LONG);
-    item(0, 0, 1, VV_ITEM_SUBLIST, "Orca");
-    frame(end, sizeof(end));
+    assert(act.frames[0].data[1] == 1 && act.frames[0].data[2] == 2);
+    assert(app.state == VV_ST_PICKER && app.picker_jumping);
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);          // ignored while jumping
     press(VV_BTN_OK, VV_PRESS_CLICK);
-    assert(app.picker_list == 1);
+    assert(act.frame_count == 0 && app.picker_cursor == 2);
+    target_state(0, VV_KIND_ORCA, VV_APP_ORCA, "Orca · wt-c · docs");
+    assert(app.state == VV_ST_IDLE && app.toast == VV_TOAST_JUMPED);
+    assert(vv_app_target_logo(&app) == VV_APP_ORCA);
+    assert(strcmp(vv_app_target_title(&app), "wt-c · docs") == 0);
+
+    // A failed Jump closes with the matching toast.
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    root_list(VV_APP_ORCA);
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);          // WeChat
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.picker_list == 2 && act.frames[0].data[1] == 2);
+    item(2, 0, 1, VV_ITEM_CURRENT, "Current · Zhang");
+    end_list(2, 1);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(act.frames[0].data[0] == VV_MSG_TARGET_SELECT && act.frames[0].data[1] == 2 &&
+           act.frames[0].data[2] == 0);
+    target_state(3, VV_KIND_APP, VV_APP_WECHAT, "WeChat");
+    assert(app.state == VV_ST_IDLE && app.toast == VV_TOAST_TARGET_DOWN);
+
+    // No TARGET_STATE: the Jump times out.
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    root_list(VV_APP_WECHAT);
+    press(VV_BTN_OK, VV_PRESS_CLICK);            // cursor on WeChat (current)
+    assert(app.picker_list == 2);
+    item(2, 0, 1, VV_ITEM_CURRENT, "Current");
+    end_list(2, 1);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    tick(VV_JUMP_TIMEOUT_MS);
+    assert(app.state == VV_ST_IDLE && app.toast == VV_TOAST_FAILED);
+
+    // A TARGET_STATE without a pending Jump leaves the picker open.
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    root_list(VV_APP_WECHAT);
+    target_state(0, VV_KIND_APP, VV_APP_WECHAT, "WeChat · Li");
+    assert(app.state == VV_ST_PICKER);
+
+    // Empty sub-list of an app that is not running; long OK backs out, then closes.
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);          // ChatGPT (not running)
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.picker_list == 3 && (app.picker_parent_flags & VV_ITEM_NOT_RUNNING));
+    end_list(3, 0);
+    assert(!app.picker_loading && app.picker_count == 0);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(act.frame_count == 0 && app.state == VV_ST_PICKER);
     press(VV_BTN_OK, VV_PRESS_LONG);
     assert(app.state == VV_ST_PICKER && app.picker_list == 0 && app.picker_loading);
     press(VV_BTN_OK, VV_PRESS_LONG);
     assert(app.state == VV_ST_IDLE);
 
-    // An empty list can be closed; a list that never ends times out.
-    press(VV_BTN_OK, VV_PRESS_LONG);
-    const uint8_t empty[] = { 0xB1, 0, 0 };
-    frame(empty, sizeof(empty));
-    assert(!app.picker_loading && app.picker_count == 0);
-    press(VV_BTN_OK, VV_PRESS_CLICK);
-    assert(act.frame_count == 0 && app.state == VV_ST_PICKER);
-    press(VV_BTN_OK, VV_PRESS_LONG);
+    // A list that never ends times out (root: 5 s; Orca: longer, it may launch).
     press(VV_BTN_OK, VV_PRESS_LONG);
     tick(VV_PICKER_TIMEOUT_MS);
+    assert(app.state == VV_ST_IDLE && app.toast == VV_TOAST_LIST_FAILED);
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    root_list(VV_APP_ORCA);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.picker_list == 1);
+    tick(VV_PICKER_LAUNCH_MS - 1);
+    assert(app.state == VV_ST_PICKER);
+    tick(1);
     assert(app.state == VV_ST_IDLE && app.toast == VV_TOAST_LIST_FAILED);
 
     // More items than fit are ignored safely.
     press(VV_BTN_OK, VV_PRESS_LONG);
     for (int i = 0; i < VV_PICKER_MAX + 5; i++) item(0, (uint8_t)i, 40, 0, "x");
     assert(app.picker_count == VV_PICKER_MAX);
+    assert(vv_app_picker_logo(&app, 10) == -1);  // index beyond the Supported Apps
+
+    // Link loss drops a pending Jump.
+    end_list(0, 40);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.picker_jumping);
+    link_event(VV_LINK_DISCONNECTED, 0);
+    assert(app.state == VV_ST_NO_LINK && !app.picker_jumping);
+}
+
+static void test_target_logo_and_title(void) {
+    vv_app_init(&app, "fw");
+    assert(vv_app_target_logo(&app) == -1 && strcmp(vv_app_target_title(&app), "") == 0);
+    connect_ready();
+    target_state(0, VV_KIND_APP, VV_APP_CHATGPT, "ChatGPT · Fix · tests");
+    assert(vv_app_target_logo(&app) == VV_APP_CHATGPT);
+    assert(strcmp(vv_app_target_title(&app), "Fix · tests") == 0);
+    target_state(0, VV_KIND_ORCA, VV_APP_NONE, "Orca");
+    assert(vv_app_target_logo(&app) == -1 && strcmp(vv_app_target_title(&app), "Orca") == 0);
+    target_state(0, VV_KIND_APP, 7, "x");
+    assert(vv_app_target_logo(&app) == -1);
+    assert(vv_app_take_dirty(&app) & VV_DIRTY_TARGET);
 }
 
 static void test_status_and_target(void) {
@@ -316,7 +409,7 @@ static void test_status_and_target(void) {
     assert(app.companion_code == 0);
 
     // Not-running Target and invalid UTF-8 in the label.
-    const uint8_t target[] = { 0xB2, 3, 1, 'Q', (uint8_t)0xFF, 'Q' };
+    const uint8_t target[] = { 0xB2, 3, 1, VV_APP_WECOM, 'Q', (uint8_t)0xFF, 'Q' };
     frame(target, sizeof(target));
     assert(app.target_status == 3 && strcmp(app.target_label, "Q?Q") == 0);
 
@@ -336,6 +429,7 @@ int main(void) {
     test_result_statuses_and_timeouts();
     test_disconnect_abandons();
     test_picker();
+    test_target_logo_and_title();
     test_status_and_target();
     puts("test_vv_app: PASS");
     return 0;

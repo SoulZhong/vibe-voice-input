@@ -9,7 +9,7 @@
 static void test_encoders(void) {
     vv_frame_t f;
     assert(vv_proto_hello(&f, "vibe-voice/1.0") == 2 + 14);
-    assert(f.data[0] == 0x01 && f.data[1] == 1 && memcmp(&f.data[2], "vibe-voice/1.0", 14) == 0);
+    assert(f.data[0] == 0x01 && f.data[1] == 2 && memcmp(&f.data[2], "vibe-voice/1.0", 14) == 0);
 
     assert(vv_proto_dict(&f, VV_MSG_DICT_START, 7) == 2 && f.data[0] == 0x10 && f.data[1] == 7);
     assert(vv_proto_dict(&f, VV_MSG_DICT_STOP, 255) == 2 && f.data[0] == 0x12);
@@ -41,8 +41,8 @@ static void test_encoders(void) {
 
 static void test_decoder(void) {
     vv_msg_t m;
-    const uint8_t ack[] = { 0x81, 1 };
-    assert(vv_proto_decode(ack, sizeof(ack), &m) && m.type == 0x81 && m.a == 1);
+    const uint8_t ack[] = { 0x81, VV_PROTO_VERSION };
+    assert(vv_proto_decode(ack, sizeof(ack), &m) && m.type == 0x81 && m.a == 2);
     const uint8_t ack_short[] = { 0x81 };
     assert(!vv_proto_decode(ack_short, 1, &m));
 
@@ -64,8 +64,12 @@ static void test_decoder(void) {
     assert(!vv_proto_decode(item_short, 4, &m));
     const uint8_t end[] = { 0xB1, 1, 3 };
     assert(vv_proto_decode(end, 3, &m) && m.a == 1 && m.b == 3);
-    const uint8_t state[] = { 0xB2, 3, 1, 'W' };
-    assert(vv_proto_decode(state, 4, &m) && m.a == 3 && m.b == 1 && m.text_len == 1);
+    // TARGET_STATE v2: status, kind, app, label.
+    const uint8_t state[] = { 0xB2, 3, 1, 2, 'W' };
+    assert(vv_proto_decode(state, 5, &m) && m.a == 3 && m.b == 1 && m.c == 2 &&
+           m.text_len == 1 && m.text[0] == 'W');
+    assert(vv_proto_decode(state, 4, &m) && m.c == 2 && m.text_len == 0);
+    assert(!vv_proto_decode(state, 3, &m));
     const uint8_t status[] = { 0x82, 2 };
     assert(vv_proto_decode(status, 2, &m) && m.a == 2 && m.text_len == 0);
 

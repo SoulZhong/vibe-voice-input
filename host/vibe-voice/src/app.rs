@@ -5,11 +5,11 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use vibe_voice::ble::{self, LinkEvent};
-use vibe_voice::config::{self, SavedState, TargetsFile};
+use vibe_voice::config;
 use vibe_voice::inject_macos::{self, MacInjector};
-use vibe_voice::orca::{OrcaApi, OrcaClient, OrcaError, OrcaSession, ProcessRunner};
+use vibe_voice::orca::{OrcaApi, OrcaClient, OrcaError, OrcaSnapshot, ProcessRunner};
 use vibe_voice::protocol::{AudioFrame, CompanionFrame, DeviceFrame, SAMPLES_PER_FRAME};
 use vibe_voice::session::{Companion, InjectError, Injector, RecogEvent};
 use vibe_voice::speech::{self, AppleRecognizer};
@@ -66,7 +66,7 @@ pub fn main() {
             println!(
                 "vibe-voice [--verbose]            run the Companion\n\
                  vibe-voice --simulate <file>      recognize a 16 kHz mono 16-bit WAV/PCM file (no BLE, no insert)\n\
-                 vibe-voice --orca-list            list Orca Sessions (read-only)\n\
+                 vibe-voice --orca-list            list Orca Sessions, Current Conversation first (read-only)\n\
                  vibe-voice --check                show permission status"
             );
         }
@@ -78,10 +78,6 @@ pub fn main() {
 }
 
 // ----- normal operation ----------------------------------------------------
-
-fn file_mtime(p: &Path) -> Option<SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
-}
 
 fn run_companion() {
     let mtm = MainThreadMarker::new().expect("main thread");
@@ -149,29 +145,20 @@ fn core_loop(
     self_tx: mpsc::Sender<CoreEvent>,
     out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) {
-    let dir = config::config_dir();
-    let targets_path = dir.join("targets.toml");
-    let state_path = dir.join("state.toml");
-    let targets = TargetsFile::load_or_create(&targets_path);
-    let mut targets_mtime = file_mtime(&targets_path);
-    let state = SavedState::load(&state_path);
     let recognizer = AppleRecognizer::new(Arc::new(move |e| {
         let _ = self_tx.send(CoreEvent::Recog(e));
     }));
     let orca = OrcaClient::new(ProcessRunner::locate());
-    let mut c = Companion::new(
-        MacInjector,
-        recognizer,
-        orca,
-        targets,
-        state,
-        Some(state_path),
-    );
+    let store = config::target_path();
+    let target = config::StoredTarget::load(&store);
+    log::info!("stored Target: {target:?}");
+    let mut c = Companion::new(MacInjector, recognizer, orca, target, Some(store));
     let mut connected = false;
     let mut deadline: Option<Instant> = None;
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
     loop {
-        // Permissions can be granted while running; poll them while linked.
+        // Focus, permissions and Orca tabs change while running: refresh
+        // the Target and STATUS while linked.
         if connected {
             deadline = Some(deadline.map_or(next_health, |d| d.min(next_health)));
         }
@@ -198,17 +185,6 @@ fn core_loop(
             }
             Some(CoreEvent::Link(LinkEvent::Frame(bytes))) => match DeviceFrame::decode(&bytes) {
                 Ok(frame) => {
-                    if matches!(
-                        frame,
-                        DeviceFrame::Hello { .. } | DeviceFrame::TargetsReq { list: 0 }
-                    ) {
-                        let m = file_mtime(&targets_path);
-                        if m != targets_mtime {
-                            targets_mtime = m;
-                            log::info!("reloading {}", targets_path.display());
-                            c.set_targets(TargetsFile::load_or_create(&targets_path));
-                        }
-                    }
                     if !matches!(frame, DeviceFrame::Audio(_)) {
                         log::debug!("<- {frame:?}");
                     }
@@ -221,7 +197,7 @@ fn core_loop(
         }
         if connected && now >= next_health {
             next_health = now + HEALTH_INTERVAL;
-            c.refresh_health();
+            c.refresh(now);
         }
         deadline = c.poll(Instant::now());
         for f in c.take_outbox() {
@@ -250,17 +226,31 @@ fn check() {
     use vibe_voice::session::Recognizer;
     println!("Recognizer zh-CN:   {:?}", r.health());
     let dir = config::config_dir();
-    println!("Config:             {}", dir.join("targets.toml").display());
+    println!(
+        "Vocabulary:         {}",
+        dir.join("vocabulary.txt").display()
+    );
 }
 
+/// Read-only: the Orca list as the Device would get it, Current
+/// Conversation first (marked `*`).
 fn orca_list() {
     let mut c = OrcaClient::new(ProcessRunner::locate());
-    match c.list() {
-        Ok(list) => {
-            for (i, s) in list.iter().enumerate() {
-                println!("{i:2}  {}  [{}]", s.label(), s.handle);
+    match c.snapshot() {
+        Ok(snap) => {
+            println!(
+                "active worktree: {}",
+                snap.active_worktree.as_deref().unwrap_or("(none)")
+            );
+            for (i, s) in snap.sessions.iter().enumerate() {
+                let mark = if i == 0 && snap.has_current { '*' } else { ' ' };
+                println!("{mark}{i:2}  {}  [{}]", s.label(), s.handle);
             }
-            println!("{} Orca Sessions", list.len());
+            match snap.current() {
+                Some(s) => println!("Current Conversation: {} [{}]", s.label(), s.handle),
+                None => println!("Current Conversation: none"),
+            }
+            println!("{} Orca Sessions", snap.sessions.len());
         }
         Err(e) => {
             eprintln!("{e}");
@@ -281,23 +271,24 @@ impl Injector for DryRunInjector {
     fn is_running(&mut self, _: &str) -> bool {
         true
     }
-    fn resolve_bundle_id(&mut self, _: &str) -> Option<String> {
-        None
-    }
     fn frontmost_bundle_id(&mut self) -> Option<String> {
-        None
+        // Pretend a Supported App is frontmost so Orca is never involved.
+        Some(config::SUPPORTED_APPS[1].bundle_id.to_owned())
     }
-    fn focused_title(&mut self, _: Option<&str>) -> Option<(String, String)> {
-        Some(("simulate".into(), String::new()))
+    fn window_title(&mut self, _: &str) -> Option<String> {
+        Some("simulate".into())
     }
-    fn insert(&mut self, _: Option<&str>, text: &str) -> Result<(), InjectError> {
+    fn activate(&mut self, _: &str) -> Result<(), InjectError> {
+        Ok(())
+    }
+    fn insert(&mut self, _: &str, text: &str) -> Result<(), InjectError> {
         println!("[dry-run] would insert: {text}");
         Ok(())
     }
-    fn submit(&mut self, _: Option<&str>) -> Result<(), InjectError> {
+    fn submit(&mut self, _: &str) -> Result<(), InjectError> {
         Ok(())
     }
-    fn delete_back(&mut self, _: Option<&str>, _: usize) -> Result<(), InjectError> {
+    fn delete_back(&mut self, _: &str, _: usize) -> Result<(), InjectError> {
         Ok(())
     }
 }
@@ -305,8 +296,11 @@ impl Injector for DryRunInjector {
 struct NoOrca;
 
 impl OrcaApi for NoOrca {
-    fn list(&mut self) -> Result<Vec<OrcaSession>, OrcaError> {
-        Ok(Vec::new())
+    fn snapshot(&mut self) -> Result<OrcaSnapshot, OrcaError> {
+        Ok(OrcaSnapshot::default())
+    }
+    fn open(&mut self) -> Result<(), OrcaError> {
+        Err(OrcaError::Unavailable("simulate".into()))
     }
     fn send_text(&mut self, _: &str, _: &str) -> Result<(), OrcaError> {
         Err(OrcaError::Stale)
@@ -399,18 +393,11 @@ fn simulate(path: &Path) -> i32 {
     let recognizer = AppleRecognizer::new(Arc::new(move |e| {
         let _ = tx.send(e);
     }));
-    let mut c = Companion::new(
-        DryRunInjector,
-        recognizer,
-        NoOrca,
-        TargetsFile::defaults(),
-        SavedState::default(),
-        None,
-    );
+    let mut c = Companion::new(DryRunInjector, recognizer, NoOrca, None, None);
     let t0 = Instant::now();
     c.handle_frame(
         DeviceFrame::Hello {
-            ver: 1,
+            ver: vibe_voice::protocol::PROTOCOL_VERSION,
             fw: "simulate".into(),
         },
         t0,

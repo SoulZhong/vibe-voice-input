@@ -3,13 +3,21 @@
 //!
 //! The driver feeds Device frames, recognizer events and time in; outgoing
 //! frames collect in an outbox the driver drains and writes to the Device.
+//!
+//! The Target is stored and follows Mac focus: whenever a Supported App is
+//! frontmost (checked every refresh and right before each Insert and
+//! Submit), the Target becomes that app's Current Conversation; focus on any
+//! other app leaves it unchanged. With no Target, or when the targeted Orca
+//! Session is gone, Orca's Current Conversation takes its place (launching
+//! Orca for an Insert or Submit). Insert, Submit and Undo bring the Target to
+//! the front first; a Jump in the Device picker sets it.
 
 use crate::audio::AudioAssembler;
-use crate::config::{SavedOrcaSession, SavedState, TargetConfig, TargetType, TargetsFile};
-use crate::orca::{OrcaApi, OrcaError, OrcaSession};
+use crate::config::{ORCA, ORCA_BUNDLE_ID, SUPPORTED_APPS, StoredTarget, supported_app};
+use crate::orca::{OrcaApi, OrcaError, OrcaSession, OrcaSnapshot};
 use crate::protocol::{
-    Action, CompanionFrame, DeviceFrame, FLAG_CURRENT, FLAG_NOT_RUNNING, FLAG_SUBLIST, LIST_ORCA,
-    LIST_ROOT, PROTOCOL_VERSION, Status, StatusCode, TargetKind, utf8_head,
+    APP_NONE, Action, CompanionFrame, DeviceFrame, FLAG_CURRENT, FLAG_NOT_RUNNING, FLAG_SUBLIST,
+    LIST_ORCA, LIST_ROOT, PROTOCOL_VERSION, Status, StatusCode, TargetKind, utf8_head,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -25,6 +33,19 @@ pub const MAX_ORCA_ITEMS: usize = 24;
 /// list rows hold 71 bytes, the Target label 127.
 pub const ITEM_LABEL_BYTES: usize = 71;
 pub const STATE_LABEL_BYTES: usize = 127;
+/// How long the periodic refresh reuses an Orca snapshot while Orca is
+/// frontmost (its tabs can change any moment) and while it is in the
+/// background (only the CLI or a Jump can change them then).
+pub const ORCA_CACHE_FRONT: Duration = Duration::from_secs(2);
+pub const ORCA_CACHE_BACKGROUND: Duration = Duration::from_secs(10);
+/// Insert, Submit, HELLO, DICT_START, lists and Jumps ask Orca afresh, but
+/// share one answer within an operation.
+pub const ORCA_CACHE_FRESH: Duration = Duration::from_millis(500);
+
+/// Shown on the Device (16 px body font: GB2312).
+pub const LABEL_CURRENT_CONVERSATION: &str = "当前会话";
+pub const LABEL_ORCA_WILL_LAUNCH: &str = "未运行，将自动启动";
+pub const LABEL_NO_SESSION: &str = "没有会话";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InjectError {
@@ -33,22 +54,22 @@ pub enum InjectError {
     Failed(String),
 }
 
-/// macOS input injection for App Targets (`None` bundle id = follow focus).
+/// macOS app control for Supported Apps other than Orca.
 pub trait Injector {
     fn accessibility_trusted(&mut self) -> bool;
     fn is_running(&mut self, bundle_id: &str) -> bool;
-    /// Read the bundle id of the app at `path`, if installed.
-    fn resolve_bundle_id(&mut self, path: &str) -> Option<String>;
     /// Bundle id of the frontmost app.
     fn frontmost_bundle_id(&mut self) -> Option<String>;
-    /// (app name, focused window title) of the app, or of the frontmost app.
-    fn focused_title(&mut self, bundle_id: Option<&str>) -> Option<(String, String)>;
-    /// Activate (unless following focus) and paste `text` without Enter.
-    fn insert(&mut self, bundle_id: Option<&str>, text: &str) -> Result<(), InjectError>;
-    /// Activate (unless following focus) and press Return.
-    fn submit(&mut self, bundle_id: Option<&str>) -> Result<(), InjectError>;
-    /// Activate (unless following focus) and press Delete `count` times.
-    fn delete_back(&mut self, bundle_id: Option<&str>, count: usize) -> Result<(), InjectError>;
+    /// Focused window title of a running app (its Target Title).
+    fn window_title(&mut self, bundle_id: &str) -> Option<String>;
+    /// Bring a running app to the front (Jump). Never launches it.
+    fn activate(&mut self, bundle_id: &str) -> Result<(), InjectError>;
+    /// Activate the app and paste `text` without Enter.
+    fn insert(&mut self, bundle_id: &str, text: &str) -> Result<(), InjectError>;
+    /// Activate the app and press Return.
+    fn submit(&mut self, bundle_id: &str) -> Result<(), InjectError>;
+    /// Activate the app and press Delete `count` times.
+    fn delete_back(&mut self, bundle_id: &str, count: usize) -> Result<(), InjectError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +106,6 @@ pub enum RecogEvent {
 /// Where a Segment went, so UNDO hits the same place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Dest {
-    Follow,
     App { bundle_id: String },
     Orca { handle: String },
 }
@@ -121,12 +141,50 @@ struct Dictation {
     partial_pending: bool,
 }
 
-/// The current Target, resolved against config and live state.
+/// The Target as the Device shows it (TARGET_STATE).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetView {
     pub status: Status,
     pub kind: TargetKind,
+    /// Supported App index for the Device's logo, or [`APP_NONE`].
+    pub app: u8,
     pub label: String,
+}
+
+/// How a resolution may touch Orca.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    /// Periodic refresh: reuse a recent Orca snapshot, never launch.
+    Refresh,
+    /// Show the Target now: ask Orca afresh, never launch.
+    Show,
+    /// Insert, Submit or Undo: ask Orca afresh and launch it when needed.
+    Act,
+}
+
+/// The resolved Target: where text goes (or why it cannot) and its view.
+#[derive(Debug)]
+struct Resolved {
+    dest: Result<Dest, Status>,
+    view: TargetView,
+}
+
+fn orca_target(s: &OrcaSession) -> StoredTarget {
+    StoredTarget::Orca {
+        handle: s.handle.clone(),
+        leaf_id: s.leaf_id.clone(),
+        worktree: s.worktree.clone(),
+        title: s.title.clone(),
+    }
+}
+
+/// `"<worktree> · <title>"` of a stored Orca Session.
+fn stored_orca_label(worktree: &str, title: &str) -> String {
+    match (worktree.is_empty(), title.is_empty()) {
+        (false, false) => format!("{worktree} · {title}"),
+        (false, true) => worktree.to_owned(),
+        _ => title.to_owned(),
+    }
 }
 
 /// Join two utterances; a space only between ASCII words.
@@ -140,7 +198,11 @@ fn join_utterances(a: &str, b: &str) -> String {
     }
     let space = a.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
         && b.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
-    if space { format!("{a} {b}") } else { format!("{a}{b}") }
+    if space {
+        format!("{a} {b}")
+    } else {
+        format!("{a}{b}")
+    }
 }
 
 /// Whether `new` starts a different utterance rather than revising `prev`.
@@ -199,10 +261,16 @@ pub struct Companion<I: Injector, R: Recognizer, O: OrcaApi> {
     pub injector: I,
     pub recognizer: R,
     pub orca: O,
-    targets: TargetsFile,
-    state: SavedState,
-    state_path: Option<PathBuf>,
-    orca_list: Vec<OrcaSession>,
+    /// Last Orca snapshot and when it was taken.
+    orca_cache: Option<(Instant, OrcaSnapshot)>,
+    /// Rows of the last Orca list sent, for TARGET_SELECT.
+    orca_rows: Vec<OrcaSession>,
+    /// The Target; `None` until first resolved.
+    target: Option<StoredTarget>,
+    /// Where the Target is persisted (`None` in tests).
+    store: Option<PathBuf>,
+    /// Last TARGET_STATE sent; `None` until HELLO.
+    view: Option<TargetView>,
     dictation: Option<Dictation>,
     last_segment: Option<Segment>,
     orca_failed: bool,
@@ -211,22 +279,23 @@ pub struct Companion<I: Injector, R: Recognizer, O: OrcaApi> {
 }
 
 impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
+    /// `target` is the stored Target; `store` where to persist changes.
     pub fn new(
         injector: I,
         recognizer: R,
         orca: O,
-        targets: TargetsFile,
-        state: SavedState,
-        state_path: Option<PathBuf>,
+        target: Option<StoredTarget>,
+        store: Option<PathBuf>,
     ) -> Self {
         Self {
             injector,
             recognizer,
             orca,
-            targets,
-            state,
-            state_path,
-            orca_list: Vec::new(),
+            orca_cache: None,
+            orca_rows: Vec::new(),
+            target,
+            store,
+            view: None,
             dictation: None,
             last_segment: None,
             orca_failed: false,
@@ -240,13 +309,8 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         std::mem::take(&mut self.outbox)
     }
 
-    pub fn saved_state(&self) -> &SavedState {
-        &self.state
-    }
-
-    /// Replace the Target configuration (after `targets.toml` changed).
-    pub fn set_targets(&mut self, targets: TargetsFile) {
-        self.targets = targets;
+    pub fn target(&self) -> Option<&StoredTarget> {
+        self.target.as_ref()
     }
 
     pub fn dictation_active(&self) -> bool {
@@ -267,13 +331,15 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         }
         self.outbox.clear();
         self.last_status = None;
+        self.view = None;
+        self.orca_rows.clear();
     }
 
     // ----- frames ---------------------------------------------------------
 
     pub fn handle_frame(&mut self, frame: DeviceFrame, now: Instant) {
         match frame {
-            DeviceFrame::Hello { ver, fw } => self.on_hello(ver, &fw),
+            DeviceFrame::Hello { ver, fw } => self.on_hello(ver, &fw, now),
             DeviceFrame::DictStart { dict } => self.on_dict_start(dict, now),
             DeviceFrame::Audio(a) => {
                 if let Some(d) = self.dictation.as_mut()
@@ -286,14 +352,14 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             }
             DeviceFrame::DictStop { dict } => self.on_dict_stop(dict, now),
             DeviceFrame::DictCancel { dict } => self.on_dict_cancel(dict),
-            DeviceFrame::Submit => self.on_submit(),
-            DeviceFrame::Undo => self.on_undo(),
-            DeviceFrame::TargetsReq { list } => self.on_targets_req(list),
-            DeviceFrame::TargetSelect { list, index } => self.on_target_select(list, index),
+            DeviceFrame::Submit => self.on_submit(now),
+            DeviceFrame::Undo => self.on_undo(now),
+            DeviceFrame::TargetsReq { list } => self.on_targets_req(list, now),
+            DeviceFrame::TargetSelect { list, index } => self.on_target_select(list, index, now),
         }
     }
 
-    fn on_hello(&mut self, ver: u8, fw: &str) {
+    fn on_hello(&mut self, ver: u8, fw: &str, now: Instant) {
         log::info!("Device HELLO ver={ver} fw={fw:?}");
         if ver != PROTOCOL_VERSION {
             log::warn!("Device protocol version {ver}, Companion speaks {PROTOCOL_VERSION}");
@@ -306,8 +372,8 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         self.send(CompanionFrame::HelloAck {
             ver: PROTOCOL_VERSION,
         });
-        let view = self.current_view();
-        self.send_state(view);
+        let r = self.resolve(Need::Show, true, now);
+        self.send_state(r.view);
         self.last_status = None;
         self.report_health();
     }
@@ -319,8 +385,8 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         }
         // After a new Dictation starts there is nothing to undo.
         self.last_segment = None;
-        let view = self.current_view();
-        self.send_state(view);
+        let r = self.resolve(Need::Show, true, now);
+        self.send_state(r.view);
         let failure = match self.recognizer.start(dict) {
             Ok(()) => None,
             Err(e) => {
@@ -331,10 +397,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
                 })
             }
         };
-        if failure.is_some() {
-            self.report_health();
-        }
-        let _ = now;
+        self.report_health();
         self.dictation = Some(Dictation {
             id: dict,
             audio: AudioAssembler::new(dict),
@@ -437,7 +500,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
                 d.best = d.committed.clone();
                 if matches!(d.phase, Phase::Finalizing { .. }) {
                     let best = d.best.clone();
-                    self.complete(best);
+                    self.complete(best, now);
                 } else {
                     // Apple finalized early (after a long pause): the task is
                     // over, so keep listening with a new one.
@@ -471,7 +534,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
                         });
                     } else {
                         let best = d.best.clone();
-                        self.complete(best);
+                        self.complete(best, now);
                     }
                 } else if d.best.trim().is_empty() {
                     d.failure = Some(Status::RecognizerError);
@@ -512,7 +575,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             log::warn!("final result timed out; using best partial");
             let best = d.best.clone();
             self.recognizer.cancel();
-            self.complete(best);
+            self.complete(best, now);
             return None;
         }
         let d = self.dictation.as_ref()?;
@@ -531,8 +594,9 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         }
     }
 
-    /// Finish the Dictation: Insert the Segment and reply RESULT.
-    fn complete(&mut self, text: String) {
+    /// Finish the Dictation: Insert the Segment into the Target and reply
+    /// RESULT.
+    fn complete(&mut self, text: String, now: Instant) {
         let Some(d) = self.dictation.take() else {
             return;
         };
@@ -547,39 +611,26 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             });
             return;
         }
-        let status = match self.current_dest() {
+        let r = self.resolve(Need::Act, true, now);
+        let status = match r.dest {
             Err(status) => status,
             Ok(dest) => {
                 log::info!(
-                    "dictation {dict}: delivering {} chars to {dest:?} (frontmost {:?})",
-                    text.chars().count(),
-                    self.injector.frontmost_bundle_id()
+                    "dictation {dict}: delivering {} chars to {dest:?}",
+                    text.chars().count()
                 );
-                let r = self.deliver(&dest, &text);
-                if dest == Dest::Follow {
-                    // Show where the text actually went (focus may have moved
-                    // since the Dictation started).
-                    let view = self.current_view();
-                    self.send_state(view);
-                }
-                if r == Status::Ok {
-                    // Follow focus: UNDO must hit the app that got the text,
-                    // even if focus moves on.
-                    let dest = match dest {
-                        Dest::Follow => self
-                            .injector
-                            .frontmost_bundle_id()
-                            .map_or(Dest::Follow, |bundle_id| Dest::App { bundle_id }),
-                        d => d,
-                    };
+                let st = self.deliver(&dest, &text, now);
+                if st == Status::Ok {
                     self.last_segment = Some(Segment {
                         dest,
                         chars: undo_count(&text),
                     });
                 }
-                r
+                st
             }
         };
+        self.send_state(r.view);
+        self.report_health();
         log::info!(
             "dictation {dict}: {status:?} ({} chars)",
             text.chars().count()
@@ -596,71 +647,78 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         });
     }
 
-    fn deliver(&mut self, dest: &Dest, text: &str) -> Status {
+    fn deliver(&mut self, dest: &Dest, text: &str, now: Instant) -> Status {
         match dest {
-            Dest::Follow => self.inject(|i| i.insert(None, text)),
             Dest::App { bundle_id } => {
                 let b = bundle_id.clone();
-                self.inject(|i| i.insert(Some(&b), text))
+                self.inject(|i| i.insert(&b, text))
             }
             Dest::Orca { handle } => {
-                let h = handle.clone();
-                let r = self.orca.send_text(&h, text);
-                if r.is_ok()
-                    && let Err(e) = self.orca.switch(&h)
-                {
-                    log::debug!("orca switch: {e}");
-                }
+                let r = self
+                    .orca_front(handle, now)
+                    .and_then(|()| self.orca.send_text(handle, text));
                 self.orca_status(r)
             }
         }
     }
 
-    fn inject(&mut self, f: impl FnOnce(&mut I) -> Result<(), InjectError>) -> Status {
-        match f(&mut self.injector) {
-            Ok(()) => Status::Ok,
-            Err(InjectError::NotRunning) => Status::TargetUnavailable,
-            Err(InjectError::Permission) => {
-                self.report_health();
-                Status::Permission
-            }
-            Err(InjectError::Failed(m)) => {
-                log::error!("inject failed: {m}");
-                Status::TargetUnavailable
-            }
+    /// Bring an Orca Session to the front: switch its tab, activate Orca.
+    fn orca_front(&mut self, handle: &str, now: Instant) -> Result<(), OrcaError> {
+        self.orca.switch(handle)?;
+        if let Err(e) = self.injector.activate(ORCA_BUNDLE_ID) {
+            log::warn!("activate Orca: {e:?}");
         }
+        // Orca reports the new active tab a moment later; until the next
+        // fresh snapshot, treat this session as its Current Conversation so
+        // following focus to Orca keeps it.
+        if let Some((at, snap)) = self.orca_cache.as_mut()
+            && let Some(i) = snap.sessions.iter().position(|s| s.handle == handle)
+        {
+            let s = snap.sessions.remove(i);
+            snap.sessions.insert(0, s);
+            snap.has_current = true;
+            *at = now;
+        }
+        Ok(())
+    }
+
+    fn inject(&mut self, f: impl FnOnce(&mut I) -> Result<(), InjectError>) -> Status {
+        inject_status(f(&mut self.injector))
     }
 
     fn orca_status(&mut self, r: Result<(), OrcaError>) -> Status {
         match r {
             Ok(()) => {
-                if self.orca_failed {
-                    self.orca_failed = false;
-                    self.report_health();
-                }
+                self.orca_failed = false;
                 Status::Ok
             }
-            Err(OrcaError::Stale) => Status::TargetUnavailable,
             Err(e) => {
-                log::error!("{e}");
-                if matches!(e, OrcaError::Unavailable(_)) {
-                    self.orca_failed = true;
-                    self.report_health();
-                }
+                // The terminal may be gone: ask Orca afresh next time.
+                self.orca_cache = None;
+                self.orca_error(&e);
                 Status::TargetUnavailable
             }
         }
     }
 
+    fn orca_error(&mut self, e: &OrcaError) {
+        log::warn!("{e}");
+        if matches!(e, OrcaError::Unavailable(_)) {
+            self.orca_failed = true;
+        }
+    }
+
     // ----- actions --------------------------------------------------------
 
-    fn on_submit(&mut self) {
-        let status = match self.current_dest() {
+    fn on_submit(&mut self, now: Instant) {
+        let r = self.resolve(Need::Act, true, now);
+        let status = match r.dest {
             Err(s) => s,
-            Ok(Dest::Follow) => self.inject(|i| i.submit(None)),
-            Ok(Dest::App { bundle_id }) => self.inject(|i| i.submit(Some(&bundle_id))),
+            Ok(Dest::App { bundle_id }) => self.inject(|i| i.submit(&bundle_id)),
             Ok(Dest::Orca { handle }) => {
-                let r = self.orca.send_enter(&handle);
+                let r = self
+                    .orca_front(&handle, now)
+                    .and_then(|()| self.orca.send_enter(&handle));
                 self.orca_status(r)
             }
         };
@@ -668,13 +726,16 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         if status == Status::Ok {
             self.last_segment = None;
         }
+        self.send_state(r.view);
+        self.report_health();
         self.send(CompanionFrame::ActionResult {
             action: Action::Submit,
             status,
         });
     }
 
-    fn on_undo(&mut self) {
+    /// UNDO goes to where the latest Segment went, whatever the Target is now.
+    fn on_undo(&mut self, now: Instant) {
         let Some(seg) = self.last_segment.clone() else {
             self.send(CompanionFrame::ActionResult {
                 action: Action::Undo,
@@ -684,329 +745,380 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         };
         let n = seg.chars;
         let status = match &seg.dest {
-            Dest::Follow => self.inject(|i| i.delete_back(None, n)),
             Dest::App { bundle_id } => {
                 let b = bundle_id.clone();
                 if self.injector.is_running(&b) {
-                    self.inject(|i| i.delete_back(Some(&b), n))
+                    self.inject(|i| i.delete_back(&b, n))
                 } else {
                     Status::TargetUnavailable
                 }
             }
             Dest::Orca { handle } => {
-                let r = self.orca.send_backspaces(handle, n);
+                let r = self
+                    .orca_front(handle, now)
+                    .and_then(|()| self.orca.send_backspaces(handle, n));
                 self.orca_status(r)
             }
         };
         if status == Status::Ok {
             self.last_segment = None;
         }
+        self.report_health();
         self.send(CompanionFrame::ActionResult {
             action: Action::Undo,
             status,
         });
     }
 
-    // ----- targets --------------------------------------------------------
+    // ----- Target ---------------------------------------------------------
 
-    fn selected_index(&self) -> usize {
-        self.state
-            .selected
-            .as_deref()
-            .and_then(|id| self.targets.targets.iter().position(|t| t.id == id))
-            .filter(|&i| {
-                self.targets.targets[i].kind != TargetType::Orca || self.state.orca.is_some()
-            })
-            .unwrap_or(0)
-    }
-
-    fn bundle_of(&mut self, t: &TargetConfig) -> Option<String> {
-        if let Some(b) = &t.bundle_id {
-            return Some(b.clone());
+    fn set_target(&mut self, t: StoredTarget) {
+        if self.target.as_ref() == Some(&t) {
+            return;
         }
-        t.app_path
-            .as_deref()
-            .and_then(|p| self.injector.resolve_bundle_id(p))
-    }
-
-    fn app_running(&mut self, t: &TargetConfig) -> bool {
-        match self.bundle_of(t) {
-            Some(b) => self.injector.is_running(&b),
-            None => false,
+        log::info!("Target set to {t:?}");
+        if let Some(p) = &self.store {
+            t.save(p);
         }
+        self.target = Some(t);
     }
 
-    /// Find the saved Orca Session among live terminals (by handle, then by
-    /// pane id after an Orca restart re-issued handles).
-    fn find_orca(&mut self) -> Result<Option<OrcaSession>, OrcaError> {
-        let Some(saved) = self.state.orca.clone() else {
-            return Ok(None);
+    /// Mac focus on a Supported App sets the Target to its Current
+    /// Conversation; focus elsewhere leaves it unchanged.
+    fn follow_focus(&mut self, need: Need, now: Instant) {
+        let Some(i) = self
+            .injector
+            .frontmost_bundle_id()
+            .as_deref()
+            .and_then(supported_app)
+        else {
+            return;
         };
-        let list = self.orca.list()?;
-        let found = list
-            .iter()
-            .find(|s| s.handle == saved.handle)
-            .or_else(|| {
-                list.iter()
-                    .find(|s| !saved.leaf_id.is_empty() && s.leaf_id == saved.leaf_id)
-            })
-            .cloned();
-        if let Some(s) = &found
-            && s.handle != saved.handle
-        {
-            log::info!("Orca handle changed {} -> {}", saved.handle, s.handle);
-            self.state.orca = Some(SavedOrcaSession {
-                handle: s.handle.clone(),
-                leaf_id: s.leaf_id.clone(),
-                label: s.label(),
+        if i != ORCA {
+            self.set_target(StoredTarget::App {
+                bundle_id: SUPPORTED_APPS[i].bundle_id.to_owned(),
             });
-            self.persist();
+            return;
         }
-        Ok(found)
-    }
-
-    fn current_dest(&mut self) -> Result<Dest, Status> {
-        let t = self.targets.targets[self.selected_index()].clone();
-        match t.kind {
-            TargetType::Follow => Ok(Dest::Follow),
-            TargetType::App => match self.bundle_of(&t) {
-                Some(b) if self.injector.is_running(&b) => Ok(Dest::App { bundle_id: b }),
-                _ => Err(Status::TargetUnavailable),
-            },
-            TargetType::Orca => match self.state.orca.clone() {
-                Some(s) => Ok(Dest::Orca { handle: s.handle }),
-                None => Err(Status::TargetUnavailable),
-            },
+        match self.orca_snapshot(need, true, now) {
+            Ok(snap) => {
+                if let Some(s) = snap.current() {
+                    let t = orca_target(s);
+                    self.set_target(t);
+                }
+            }
+            Err(e) => self.orca_error(&e),
         }
     }
 
-    /// Resolve the current Target and its Target Title.
-    pub fn current_view(&mut self) -> TargetView {
-        let t = self.targets.targets[self.selected_index()].clone();
-        let ax = |s: &mut Self| {
-            if s.injector.accessibility_trusted() {
-                Status::Ok
-            } else {
-                Status::Permission
+    /// Resolve the Target (after following focus when `follow`).
+    fn resolve(&mut self, need: Need, follow: bool, now: Instant) -> Resolved {
+        if follow {
+            self.follow_focus(need, now);
+        }
+        match self.target.clone() {
+            Some(StoredTarget::App { bundle_id }) => {
+                let index = supported_app(&bundle_id);
+                let name = index.map_or("?", |i| SUPPORTED_APPS[i].name);
+                let app = index.map_or(APP_NONE, |i| i as u8);
+                if !self.injector.is_running(&bundle_id) {
+                    // Never launched: report it.
+                    return Resolved {
+                        dest: Err(Status::TargetUnavailable),
+                        view: TargetView {
+                            status: Status::TargetUnavailable,
+                            kind: TargetKind::App,
+                            app,
+                            label: compose_label(name, None, STATE_LABEL_BYTES),
+                        },
+                    };
+                }
+                let status = if self.injector.accessibility_trusted() {
+                    Status::Ok
+                } else {
+                    Status::Permission
+                };
+                let title = self.injector.window_title(&bundle_id);
+                Resolved {
+                    dest: Ok(Dest::App { bundle_id }),
+                    view: TargetView {
+                        status,
+                        kind: TargetKind::App,
+                        app,
+                        label: compose_label(name, title.as_deref(), STATE_LABEL_BYTES),
+                    },
+                }
+            }
+            stored => self.resolve_orca(stored, need, now),
+        }
+    }
+
+    /// The targeted Orca Session, or Orca's Current Conversation when there
+    /// is no Target or the session is gone (stored silently). Launches Orca
+    /// for [`Need::Act`].
+    fn resolve_orca(&mut self, stored: Option<StoredTarget>, need: Need, now: Instant) -> Resolved {
+        let name = SUPPORTED_APPS[ORCA].name;
+        let (handle, leaf_id, stored_label) = match &stored {
+            Some(StoredTarget::Orca {
+                handle,
+                leaf_id,
+                worktree,
+                title,
+            }) => (
+                handle.clone(),
+                leaf_id.clone(),
+                Some(stored_orca_label(worktree, title)),
+            ),
+            _ => (String::new(), String::new(), None),
+        };
+        let label = |extra: Option<&str>| compose_label(name, extra, STATE_LABEL_BYTES);
+        let unavailable = |label: String| Resolved {
+            dest: Err(Status::TargetUnavailable),
+            view: TargetView {
+                status: Status::TargetUnavailable,
+                kind: TargetKind::Orca,
+                app: ORCA as u8,
+                label,
+            },
+        };
+        if !self.injector.is_running(ORCA_BUNDLE_ID) {
+            self.orca_cache = None;
+            if need != Need::Act {
+                // Usable: the next Insert or Submit launches Orca.
+                let extra = stored_label.as_deref().unwrap_or(LABEL_ORCA_WILL_LAUNCH);
+                return Resolved {
+                    dest: Err(Status::TargetUnavailable),
+                    view: TargetView {
+                        status: Status::Ok,
+                        kind: TargetKind::Orca,
+                        app: ORCA as u8,
+                        label: label(Some(extra)),
+                    },
+                };
+            }
+            if let Err(e) = self.orca.open() {
+                self.orca_error(&e);
+                return unavailable(label(stored_label.as_deref()));
+            }
+        }
+        let snap = match self.orca_snapshot(need, false, now) {
+            Ok(s) => s,
+            Err(e) => {
+                self.orca_error(&e);
+                return unavailable(label(stored_label.as_deref()));
             }
         };
-        match t.kind {
-            TargetType::Follow => {
-                let status = ax(self);
-                let front = self.injector.focused_title(None).map(|(app, _)| app);
-                TargetView {
-                    status,
-                    kind: TargetKind::FollowFocus,
-                    label: compose_label(&t.name, front.as_deref(), STATE_LABEL_BYTES),
-                }
-            }
-            TargetType::App => {
-                let bundle = self.bundle_of(&t);
-                match bundle {
-                    Some(b) if self.injector.is_running(&b) => {
-                        let status = ax(self);
-                        let title = self.injector.focused_title(Some(&b)).map(|(_, w)| w);
-                        TargetView {
-                            status,
-                            kind: TargetKind::App,
-                            label: compose_label(&t.name, title.as_deref(), STATE_LABEL_BYTES),
-                        }
-                    }
-                    _ => TargetView {
-                        status: Status::TargetUnavailable,
-                        kind: TargetKind::App,
-                        label: compose_label(&t.name, None, STATE_LABEL_BYTES),
+        let found = snap
+            .sessions
+            .iter()
+            .find(|s| !handle.is_empty() && s.handle == handle)
+            .or_else(|| {
+                snap.sessions
+                    .iter()
+                    .find(|s| !leaf_id.is_empty() && s.leaf_id == leaf_id)
+            })
+            .or_else(|| snap.current())
+            .cloned();
+        match found {
+            Some(s) => {
+                self.set_target(orca_target(&s));
+                Resolved {
+                    dest: Ok(Dest::Orca {
+                        handle: s.handle.clone(),
+                    }),
+                    view: TargetView {
+                        status: Status::Ok,
+                        kind: TargetKind::Orca,
+                        app: ORCA as u8,
+                        label: label(Some(&s.label())),
                     },
                 }
             }
-            TargetType::Orca => {
-                let saved_label = self
-                    .state
-                    .orca
-                    .as_ref()
-                    .map(|s| s.label.clone())
-                    .unwrap_or_default();
-                match self.find_orca() {
-                    Ok(Some(s)) => {
-                        if self.orca_failed {
-                            self.orca_failed = false;
-                            self.report_health();
-                        }
-                        TargetView {
-                            status: Status::Ok,
-                            kind: TargetKind::OrcaSession,
-                            label: compose_label(&s.worktree, Some(&s.title), STATE_LABEL_BYTES),
-                        }
-                    }
-                    Ok(None) => TargetView {
-                        status: Status::TargetUnavailable,
-                        kind: TargetKind::OrcaSession,
-                        label: utf8_head(&saved_label, STATE_LABEL_BYTES).to_owned(),
-                    },
-                    Err(e) => {
-                        log::warn!("{e}");
-                        if matches!(e, OrcaError::Unavailable(_)) && !self.orca_failed {
-                            self.orca_failed = true;
-                            self.report_health();
-                        }
-                        TargetView {
-                            status: Status::TargetUnavailable,
-                            kind: TargetKind::OrcaSession,
-                            label: utf8_head(&saved_label, STATE_LABEL_BYTES).to_owned(),
-                        }
-                    }
-                }
+            None => unavailable(label(Some(LABEL_NO_SESSION))),
+        }
+    }
+
+    fn orca_snapshot(
+        &mut self,
+        need: Need,
+        orca_front: bool,
+        now: Instant,
+    ) -> Result<OrcaSnapshot, OrcaError> {
+        if let Some((at, snap)) = &self.orca_cache {
+            let max_age = match need {
+                Need::Refresh if orca_front => ORCA_CACHE_FRONT,
+                Need::Refresh => ORCA_CACHE_BACKGROUND,
+                _ => ORCA_CACHE_FRESH,
+            };
+            if now.saturating_duration_since(*at) < max_age {
+                return Ok(snap.clone());
             }
         }
+        let snap = self.orca.snapshot()?;
+        self.orca_failed = false;
+        self.orca_cache = Some((now, snap.clone()));
+        Ok(snap)
     }
 
     fn send_state(&mut self, v: TargetView) {
         log::info!("Target: {} ({:?})", v.label, v.status);
+        self.view = Some(v.clone());
         self.send(CompanionFrame::TargetState {
             status: v.status,
             kind: v.kind,
+            app: v.app,
             label: v.label,
         });
     }
 
-    fn on_targets_req(&mut self, list: u8) {
-        match list {
+    /// Index of the Supported App the Target is in (Orca without one).
+    fn target_app(&self) -> usize {
+        match &self.target {
+            Some(StoredTarget::App { bundle_id }) => supported_app(bundle_id).unwrap_or(ORCA),
+            _ => ORCA,
+        }
+    }
+
+    // ----- picker (Jump) --------------------------------------------------
+
+    fn item(&mut self, list: u8, index: usize, count: usize, flags: u8, label: String) {
+        self.send(CompanionFrame::TargetItem {
+            list,
+            index: index as u8,
+            count: count as u8,
+            flags,
+            label,
+        });
+    }
+
+    fn on_targets_req(&mut self, list: u8, now: Instant) {
+        let count = match list {
             LIST_ROOT => {
-                let current = self.selected_index();
-                let targets = self.targets.targets.clone();
-                let count = targets.len() as u8;
-                for (i, t) in targets.iter().enumerate() {
-                    let mut flags = 0;
+                let n = SUPPORTED_APPS.len();
+                let current = self.target_app();
+                for (i, app) in SUPPORTED_APPS.iter().enumerate() {
+                    let mut flags = FLAG_SUBLIST;
+                    if !self.injector.is_running(app.bundle_id) {
+                        flags |= FLAG_NOT_RUNNING;
+                    }
                     if i == current {
                         flags |= FLAG_CURRENT;
                     }
-                    match t.kind {
-                        TargetType::Follow => {}
-                        TargetType::App => {
-                            if !self.app_running(t) {
-                                flags |= FLAG_NOT_RUNNING;
-                            }
-                        }
-                        TargetType::Orca => {
-                            flags |= FLAG_SUBLIST;
-                            if t.bundle_id.is_some() && !self.app_running(t) {
-                                flags |= FLAG_NOT_RUNNING;
-                            }
-                        }
-                    }
-                    let label = compose_label(&t.name, None, ITEM_LABEL_BYTES);
-                    self.send(CompanionFrame::TargetItem {
+                    self.item(
                         list,
-                        index: i as u8,
-                        count,
+                        i,
+                        n,
                         flags,
-                        label,
-                    });
+                        compose_label(app.name, None, ITEM_LABEL_BYTES),
+                    );
                 }
-                self.send(CompanionFrame::TargetEnd { list, count });
+                n
             }
-            LIST_ORCA => {
-                let sessions = match self.orca.list() {
-                    Ok(s) => {
-                        if self.orca_failed {
-                            self.orca_failed = false;
-                            self.report_health();
-                        }
-                        s
-                    }
-                    Err(e) => {
-                        log::warn!("{e}");
-                        self.orca_failed = true;
-                        self.report_health();
-                        Vec::new()
-                    }
-                };
-                let sessions: Vec<_> = sessions.into_iter().take(MAX_ORCA_ITEMS).collect();
-                let count = sessions.len() as u8;
-                let selected_orca =
-                    self.targets.targets[self.selected_index()].kind == TargetType::Orca;
-                let current = self
-                    .state
-                    .orca
-                    .as_ref()
-                    .map(|s| s.handle.clone())
-                    .filter(|_| selected_orca);
-                for (i, s) in sessions.iter().enumerate() {
-                    let flags = if current.as_deref() == Some(s.handle.as_str()) {
-                        FLAG_CURRENT
-                    } else {
-                        0
-                    };
-                    let label = compose_label(&s.worktree, Some(&s.title), ITEM_LABEL_BYTES);
-                    self.send(CompanionFrame::TargetItem {
-                        list,
-                        index: i as u8,
-                        count,
-                        flags,
-                        label,
-                    });
+            LIST_ORCA => self.list_orca(now),
+            l if usize::from(l) <= SUPPORTED_APPS.len() => {
+                let app = SUPPORTED_APPS[usize::from(l) - 1];
+                if self.injector.is_running(app.bundle_id) {
+                    let title = self.injector.window_title(app.bundle_id);
+                    let label = compose_label(
+                        LABEL_CURRENT_CONVERSATION,
+                        title.as_deref(),
+                        ITEM_LABEL_BYTES,
+                    );
+                    self.item(list, 0, 1, FLAG_CURRENT, label);
+                    1
+                } else {
+                    0 // never launched from the picker
                 }
-                self.orca_list = sessions;
-                self.send(CompanionFrame::TargetEnd { list, count });
             }
             other => {
                 log::warn!("TARGETS_REQ for unknown list {other}");
-                self.send(CompanionFrame::TargetEnd {
-                    list: other,
-                    count: 0,
-                });
+                0
             }
-        }
+        };
+        self.send(CompanionFrame::TargetEnd {
+            list,
+            count: count as u8,
+        });
     }
 
-    fn on_target_select(&mut self, list: u8, index: u8) {
-        let i = index as usize;
-        match list {
-            LIST_ROOT if i < self.targets.targets.len() => {
-                let t = self.targets.targets[i].clone();
-                if t.kind == TargetType::Orca {
-                    // The Orca row opens the Orca Session list; the Device
-                    // should send TARGETS_REQ 1. Keep the current Target.
-                    log::info!("TARGET_SELECT on the Orca row; Target unchanged");
+    /// Orca Sessions, Current Conversation first. Launches Orca if needed.
+    fn list_orca(&mut self, now: Instant) -> usize {
+        self.orca_rows.clear();
+        if !self.injector.is_running(ORCA_BUNDLE_ID)
+            && let Err(e) = self.orca.open()
+        {
+            self.orca_error(&e);
+            self.report_health();
+            return 0;
+        }
+        let snap = match self.orca_snapshot(Need::Show, false, now) {
+            Ok(s) => s,
+            Err(e) => {
+                self.orca_error(&e);
+                self.report_health();
+                return 0;
+            }
+        };
+        let rows: Vec<_> = snap.sessions.iter().take(MAX_ORCA_ITEMS).cloned().collect();
+        for (i, s) in rows.iter().enumerate() {
+            let flags = if i == 0 && snap.has_current {
+                FLAG_CURRENT
+            } else {
+                0
+            };
+            let label = compose_label(&s.worktree, Some(&s.title), ITEM_LABEL_BYTES);
+            self.item(LIST_ORCA, i, rows.len(), flags, label);
+        }
+        self.orca_rows = rows;
+        self.report_health();
+        self.orca_rows.len()
+    }
+
+    /// Jump: the chosen conversation becomes the Target and comes to the
+    /// front; reply with the Target.
+    fn on_target_select(&mut self, list: u8, index: u8, now: Instant) {
+        let i = usize::from(index);
+        let jumped: Result<(), Status> = match list {
+            LIST_ORCA if i < self.orca_rows.len() => {
+                let s = self.orca_rows[i].clone();
+                let r = self.orca_front(&s.handle, now);
+                let st = self.orca_status(r);
+                if st == Status::Ok {
+                    self.set_target(orca_target(&s));
+                    Ok(())
                 } else {
-                    self.state.selected = Some(t.id.clone());
-                    self.persist();
+                    Err(st)
                 }
             }
-            LIST_ORCA if i < self.orca_list.len() => {
-                let s = self.orca_list[i].clone();
-                let orca_id = self
-                    .targets
-                    .targets
-                    .iter()
-                    .find(|t| t.kind == TargetType::Orca)
-                    .map(|t| t.id.clone());
-                if let Some(id) = orca_id {
-                    self.state.selected = Some(id);
-                    self.state.orca = Some(SavedOrcaSession {
-                        handle: s.handle.clone(),
-                        leaf_id: s.leaf_id.clone(),
-                        label: s.label(),
+            l if l > LIST_ORCA && usize::from(l) <= SUPPORTED_APPS.len() && i == 0 => {
+                let app = SUPPORTED_APPS[usize::from(l) - 1];
+                if self.injector.is_running(app.bundle_id) {
+                    self.set_target(StoredTarget::App {
+                        bundle_id: app.bundle_id.to_owned(),
                     });
-                    self.persist();
-                    if let Err(e) = self.orca.switch(&s.handle) {
-                        log::debug!("orca switch: {e}");
-                    }
+                    self.injector
+                        .activate(app.bundle_id)
+                        .map_err(|e| inject_status(Err(e)))
+                } else {
+                    Err(Status::TargetUnavailable)
                 }
             }
-            _ => log::warn!("TARGET_SELECT {list}/{index} out of range; Target unchanged"),
+            _ => {
+                log::warn!("TARGET_SELECT {list}/{index}: nothing to jump to");
+                Ok(())
+            }
+        };
+        // Do not follow focus here: the app just activated may not be
+        // reported frontmost yet.
+        let mut view = self.resolve(Need::Show, false, now).view;
+        if let Err(status) = jumped {
+            view.status = status;
         }
-        let view = self.current_view();
         self.send_state(view);
+        self.report_health();
     }
 
-    fn persist(&self) {
-        if let Some(p) = &self.state_path {
-            self.state.save(p);
-        }
-    }
-
-    // ----- STATUS ---------------------------------------------------------
+    // ----- STATUS and refresh --------------------------------------------
 
     /// The most important Companion-level problem right now.
     pub fn health_code(&mut self) -> (StatusCode, &'static str) {
@@ -1019,28 +1131,28 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             }
             RecognizerHealth::Ready => {}
         }
-        let kind = self.targets.targets[self.selected_index()].kind;
-        if kind != TargetType::Orca && !self.injector.accessibility_trusted() {
-            return (StatusCode::AccessibilityPermission, "需要辅助功能权限");
+        match self.view.as_ref().map(|v| v.kind) {
+            Some(TargetKind::App) if !self.injector.accessibility_trusted() => {
+                (StatusCode::AccessibilityPermission, "需要辅助功能权限")
+            }
+            Some(TargetKind::Orca) if self.orca_failed => {
+                (StatusCode::OrcaUnavailable, "Orca 不可用")
+            }
+            _ => (StatusCode::Clear, ""),
         }
-        if kind == TargetType::Orca && self.orca_failed {
-            return (StatusCode::OrcaUnavailable, "Orca 不可用");
-        }
-        (StatusCode::Clear, "")
     }
 
-    /// Re-check permissions outside a Dictation; when the health code changed
-    /// (e.g. Accessibility was just granted) resend STATUS and TARGET_STATE.
-    pub fn refresh_health(&mut self) {
-        if self.dictation.is_some() {
+    /// Periodic check while linked and not dictating: follow focus, recompute
+    /// the Target (cheaply, see [`ORCA_CACHE_FRONT`]) and send TARGET_STATE
+    /// only when it changed, then STATUS only when it changed.
+    pub fn refresh(&mut self, now: Instant) {
+        if self.dictation.is_some() || self.view.is_none() {
             return;
         }
-        let (code, _) = self.health_code();
-        if self.last_status == Some(code) {
-            return;
+        let r = self.resolve(Need::Refresh, true, now);
+        if self.view.as_ref() != Some(&r.view) {
+            self.send_state(r.view);
         }
-        let view = self.current_view();
-        self.send_state(view);
         self.report_health();
     }
 
@@ -1057,12 +1169,28 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
     }
 }
 
+fn inject_status(r: Result<(), InjectError>) -> Status {
+    match r {
+        Ok(()) => Status::Ok,
+        Err(InjectError::NotRunning) => Status::TargetUnavailable,
+        Err(InjectError::Permission) => Status::Permission,
+        Err(InjectError::Failed(m)) => {
+            log::error!("inject failed: {m}");
+            Status::TargetUnavailable
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adpcm::{AdpcmState, encode};
     use crate::protocol::AudioFrame;
     use std::collections::HashSet;
+
+    const WECHAT: &str = "com.tencent.xinWeChat";
+    const CHATGPT: &str = "com.openai.codex";
+    const GHOSTTY: &str = "com.mitchellh.ghostty";
 
     #[derive(Default)]
     struct FakeInjector {
@@ -1080,32 +1208,33 @@ mod tests {
         fn is_running(&mut self, b: &str) -> bool {
             self.running.contains(b)
         }
-        fn resolve_bundle_id(&mut self, path: &str) -> Option<String> {
-            (path == "/Applications/Codex.app" && self.running.contains("codex.desktop"))
-                .then(|| "codex.desktop".into())
-        }
         fn frontmost_bundle_id(&mut self) -> Option<String> {
             self.frontmost.clone()
         }
-        fn focused_title(&mut self, b: Option<&str>) -> Option<(String, String)> {
-            Some(match b {
-                None => ("Ghostty".into(), "zsh".into()),
-                Some(b) => (b.into(), format!("{b}-chat")),
-            })
+        fn window_title(&mut self, b: &str) -> Option<String> {
+            Some(if b == WECHAT { "张三" } else { "window" }.into())
         }
-        fn insert(&mut self, b: Option<&str>, text: &str) -> Result<(), InjectError> {
+        fn activate(&mut self, b: &str) -> Result<(), InjectError> {
+            if !self.running.contains(b) {
+                return Err(InjectError::NotRunning);
+            }
+            self.log.push(format!("activate {b}"));
+            self.frontmost = Some(b.into());
+            Ok(())
+        }
+        fn insert(&mut self, b: &str, text: &str) -> Result<(), InjectError> {
             if let Some(e) = self.fail_insert.clone() {
                 return Err(e);
             }
-            self.log.push(format!("insert {b:?} {text}"));
+            self.log.push(format!("insert {b} {text}"));
             Ok(())
         }
-        fn submit(&mut self, b: Option<&str>) -> Result<(), InjectError> {
-            self.log.push(format!("submit {b:?}"));
+        fn submit(&mut self, b: &str) -> Result<(), InjectError> {
+            self.log.push(format!("submit {b}"));
             Ok(())
         }
-        fn delete_back(&mut self, b: Option<&str>, n: usize) -> Result<(), InjectError> {
-            self.log.push(format!("delete {b:?} {n}"));
+        fn delete_back(&mut self, b: &str, n: usize) -> Result<(), InjectError> {
+            self.log.push(format!("delete {b} {n}"));
             Ok(())
         }
     }
@@ -1146,17 +1275,28 @@ mod tests {
 
     #[derive(Default)]
     struct FakeOrca {
-        sessions: Vec<OrcaSession>,
+        snap: OrcaSnapshot,
         unavailable: bool,
+        open_fails: bool,
+        snapshots: usize,
         log: Vec<String>,
     }
 
     impl OrcaApi for FakeOrca {
-        fn list(&mut self) -> Result<Vec<OrcaSession>, OrcaError> {
+        fn snapshot(&mut self) -> Result<OrcaSnapshot, OrcaError> {
+            self.snapshots += 1;
             if self.unavailable {
                 return Err(OrcaError::Unavailable("down".into()));
             }
-            Ok(self.sessions.clone())
+            Ok(self.snap.clone())
+        }
+        fn open(&mut self) -> Result<(), OrcaError> {
+            self.log.push("open".into());
+            if self.open_fails {
+                Err(OrcaError::Unavailable("launch timed out".into()))
+            } else {
+                Ok(())
+            }
         }
         fn send_text(&mut self, h: &str, t: &str) -> Result<(), OrcaError> {
             self.check(h)?;
@@ -1176,6 +1316,16 @@ mod tests {
         fn switch(&mut self, h: &str) -> Result<(), OrcaError> {
             self.check(h)?;
             self.log.push(format!("switch {h}"));
+            // Like Orca: the session's tab becomes active.
+            let i = self
+                .snap
+                .sessions
+                .iter()
+                .position(|s| s.handle == h)
+                .unwrap();
+            let s = self.snap.sessions.remove(i);
+            self.snap.sessions.insert(0, s);
+            self.snap.has_current = true;
             Ok(())
         }
     }
@@ -1185,7 +1335,7 @@ mod tests {
             if self.unavailable {
                 return Err(OrcaError::Unavailable("down".into()));
             }
-            if self.sessions.iter().any(|s| s.handle == h) {
+            if self.snap.sessions.iter().any(|s| s.handle == h) {
                 Ok(())
             } else {
                 Err(OrcaError::Stale)
@@ -1195,36 +1345,86 @@ mod tests {
 
     type C = Companion<FakeInjector, FakeRecognizer, FakeOrca>;
 
-    fn session(h: &str, leaf: &str, wt: &str, title: &str) -> OrcaSession {
+    fn session(h: &str, wt: &str, title: &str) -> OrcaSession {
         OrcaSession {
             handle: h.into(),
-            leaf_id: leaf.into(),
+            leaf_id: format!("leaf_{h}"),
+            worktree_id: format!("repo::/src/{wt}"),
             worktree: wt.into(),
             title: title.into(),
         }
     }
 
+    /// WeChat frontmost, no Target yet; Orca running with my-passport active.
     fn companion() -> C {
         let mut inj = FakeInjector {
             trusted: true,
+            frontmost: Some(WECHAT.into()),
             ..Default::default()
         };
-        inj.running.insert("com.mitchellh.ghostty".into());
-        inj.running.insert("com.tencent.xinWeChat".into());
+        inj.running.insert(ORCA_BUNDLE_ID.into());
+        inj.running.insert(WECHAT.into());
+        inj.running.insert(GHOSTTY.into());
         let orca = FakeOrca {
-            sessions: vec![
-                session("term_a", "leaf_a", "my-passport", "语音输入"),
-                session("term_b", "leaf_b", "voice-notes", "PR"),
-            ],
+            snap: OrcaSnapshot {
+                sessions: vec![
+                    session("term_a", "my-passport", "语音输入"),
+                    session("term_b", "my-passport", "server"),
+                    session("term_c", "voice-notes", "PR"),
+                ],
+                has_current: true,
+                active_worktree: Some("repo::/src/my-passport".into()),
+            },
             ..Default::default()
         };
-        Companion::new(
-            inj,
-            FakeRecognizer::default(),
-            orca,
-            TargetsFile::defaults(),
-            SavedState::default(),
-            None,
+        Companion::new(inj, FakeRecognizer::default(), orca, None, None)
+    }
+
+    fn hello(c: &mut C, now: Instant) -> Vec<CompanionFrame> {
+        c.handle_frame(
+            DeviceFrame::Hello {
+                ver: PROTOCOL_VERSION,
+                fw: "0.2".into(),
+            },
+            now,
+        );
+        c.take_outbox()
+    }
+
+    fn state(status: Status, kind: TargetKind, label: &str) -> CompanionFrame {
+        let name = label.split(" · ").next().unwrap();
+        let app = SUPPORTED_APPS
+            .iter()
+            .position(|a| a.name == name)
+            .map_or(APP_NONE, |i| i as u8);
+        CompanionFrame::TargetState {
+            status,
+            kind,
+            app,
+            label: label.into(),
+        }
+    }
+
+    fn wechat_state() -> CompanionFrame {
+        state(Status::Ok, TargetKind::App, "微信 · 张三")
+    }
+
+    /// Ghostty (not a Supported App) frontmost, no Target yet.
+    fn companion_elsewhere() -> C {
+        let mut c = companion();
+        c.injector.frontmost = Some(GHOSTTY.into());
+        c
+    }
+
+    fn orca_state(label: &str) -> CompanionFrame {
+        state(Status::Ok, TargetKind::Orca, &format!("Orca · {label}"))
+    }
+
+    fn orca_a_state() -> CompanionFrame {
+        state(
+            Status::Ok,
+            TargetKind::Orca,
+            "Orca · my-passport · 语音输入",
         )
     }
 
@@ -1240,12 +1440,6 @@ mod tests {
             index: 0,
             adpcm: encode(&mut st, &pcm),
         })
-    }
-
-    fn select(c: &mut C, list: u8, index: u8, now: Instant) {
-        c.handle_frame(DeviceFrame::TargetsReq { list }, now);
-        c.handle_frame(DeviceFrame::TargetSelect { list, index }, now);
-        c.take_outbox();
     }
 
     /// Run a whole Dictation that recognizes `text`.
@@ -1273,6 +1467,10 @@ mod tests {
         );
     }
 
+    fn action(action: Action, status: Status) -> CompanionFrame {
+        CompanionFrame::ActionResult { action, status }
+    }
+
     #[test]
     fn pause_restart_keeps_first_sentence() {
         let mut c = companion();
@@ -1291,7 +1489,10 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(c.injector.log, ["insert None 把这个函数改成异步然后加测试。"]);
+        assert_eq!(
+            c.injector.log,
+            ["insert com.tencent.xinWeChat 把这个函数改成异步然后加测试。"]
+        );
     }
 
     #[test]
@@ -1317,7 +1518,10 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(c.injector.log, ["insert None First part.Second part."]);
+        assert_eq!(
+            c.injector.log,
+            ["insert com.tencent.xinWeChat First part.Second part."]
+        );
     }
 
     #[test]
@@ -1351,114 +1555,10 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(c.injector.log, ["insert None 把函数改成异步"]);
-    }
-
-    #[test]
-    fn hello_gets_ack_then_target_state() {
-        let mut c = companion();
-        let now = Instant::now();
-        c.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: "0.1".into(),
-            },
-            now,
-        );
-        let out = c.take_outbox();
-        assert_eq!(out[0], CompanionFrame::HelloAck { ver: 1 });
         assert_eq!(
-            out[1],
-            CompanionFrame::TargetState {
-                status: Status::Ok,
-                kind: TargetKind::FollowFocus,
-                label: "跟随当前焦点 · Ghostty".into()
-            }
+            c.injector.log,
+            ["insert com.tencent.xinWeChat 把函数改成异步"]
         );
-        assert_eq!(
-            out[2],
-            CompanionFrame::Status {
-                code: StatusCode::Clear,
-                text: String::new()
-            }
-        );
-    }
-
-    #[test]
-    fn granting_accessibility_clears_status_on_refresh() {
-        let mut c = companion();
-        c.injector.trusted = false;
-        c.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: String::new(),
-            },
-            Instant::now(),
-        );
-        c.take_outbox();
-        c.refresh_health();
-        assert!(c.take_outbox().is_empty(), "unchanged health stays quiet");
-        c.injector.trusted = true;
-        c.refresh_health();
-        let out = c.take_outbox();
-        assert!(matches!(
-            out[0],
-            CompanionFrame::TargetState {
-                status: Status::Ok,
-                ..
-            }
-        ));
-        assert!(matches!(
-            out[1],
-            CompanionFrame::Status {
-                code: StatusCode::Clear,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn hello_reports_missing_permissions() {
-        let mut c = companion();
-        c.injector.trusted = false;
-        c.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: String::new(),
-            },
-            Instant::now(),
-        );
-        let out = c.take_outbox();
-        assert!(matches!(
-            out[1],
-            CompanionFrame::TargetState {
-                status: Status::Permission,
-                ..
-            }
-        ));
-        assert!(matches!(
-            out[2],
-            CompanionFrame::Status {
-                code: StatusCode::AccessibilityPermission,
-                ..
-            }
-        ));
-        c.recognizer.health = Some(RecognizerHealth::NoPermission);
-        c.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: String::new(),
-            },
-            Instant::now(),
-        );
-        let out = c.take_outbox();
-        assert!(matches!(
-            out[2],
-            CompanionFrame::Status {
-                code: StatusCode::SpeechPermission,
-                ..
-            }
-        ));
     }
 
     #[test]
@@ -1474,7 +1574,10 @@ mod tests {
                 text: "把这个函数改成异步".into()
             }
         );
-        assert_eq!(c.injector.log, ["insert None 把这个函数改成异步"]);
+        assert_eq!(
+            c.injector.log,
+            ["insert com.tencent.xinWeChat 把这个函数改成异步"]
+        );
         assert_eq!(c.recognizer.started, [4]);
         assert_eq!(c.recognizer.samples, 320);
         assert_eq!(c.recognizer.finished, 1);
@@ -1570,11 +1673,7 @@ mod tests {
         assert_eq!(
             c.take_outbox(),
             [
-                CompanionFrame::TargetState {
-                    status: Status::Ok,
-                    kind: TargetKind::FollowFocus,
-                    label: "跟随当前焦点 · Ghostty".into()
-                },
+                wechat_state(),
                 CompanionFrame::Result {
                     dict: 2,
                     status: Status::Ok,
@@ -1722,6 +1821,580 @@ mod tests {
     }
 
     #[test]
+    fn hello_gets_ack_then_target_state() {
+        let mut c = companion();
+        let out = hello(&mut c, Instant::now());
+        assert_eq!(
+            out,
+            [
+                CompanionFrame::HelloAck { ver: 2 },
+                wechat_state(),
+                CompanionFrame::Status {
+                    code: StatusCode::Clear,
+                    text: String::new()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn frontmost_supported_app_becomes_the_target() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        let out = dictate(&mut c, 1, "晚上吃什么", t0);
+        assert_eq!(out[0], wechat_state(), "TARGET_STATE at DICT_START");
+        assert_eq!(out[out.len() - 2], wechat_state(), "and after the Insert");
+        c.handle_frame(DeviceFrame::Undo, t0);
+        c.handle_frame(DeviceFrame::Submit, t0);
+        assert_eq!(
+            c.injector.log,
+            [
+                format!("insert {WECHAT} 晚上吃什么"),
+                format!("delete {WECHAT} 5"),
+                format!("submit {WECHAT}")
+            ]
+        );
+        assert_eq!(
+            c.take_outbox(),
+            [
+                action(Action::Undo, Status::Ok),
+                wechat_state(),
+                action(Action::Submit, Status::Ok)
+            ]
+        );
+        assert!(c.orca.log.is_empty());
+        assert_eq!(
+            c.target(),
+            Some(&StoredTarget::App {
+                bundle_id: WECHAT.into()
+            })
+        );
+    }
+
+    #[test]
+    fn focus_elsewhere_keeps_the_target() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.injector.frontmost = Some(GHOSTTY.into());
+        let out = dictate(&mut c, 1, "你好", t0);
+        assert_eq!(out[0], wechat_state());
+        c.handle_frame(DeviceFrame::Submit, t0);
+        assert_eq!(
+            c.injector.log,
+            [format!("insert {WECHAT} 你好"), format!("submit {WECHAT}")]
+        );
+    }
+
+    #[test]
+    fn focus_change_right_before_insert_counts() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        c.injector.running.insert(CHATGPT.into());
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        c.injector.frontmost = Some(CHATGPT.into());
+        c.handle_frame(DeviceFrame::DictStop { dict: 1 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: "hi".into(),
+            },
+            t0,
+        );
+        let out = c.take_outbox();
+        assert_eq!(out[0], wechat_state());
+        assert!(out.contains(&state(Status::Ok, TargetKind::App, "ChatGPT · window")));
+        assert_eq!(c.injector.log, [format!("insert {CHATGPT} hi")]);
+    }
+
+    #[test]
+    fn no_target_is_orca_current_conversation() {
+        let mut c = companion_elsewhere();
+        let t0 = Instant::now();
+        assert_eq!(hello(&mut c, t0)[1], orca_a_state());
+        let out = dictate(&mut c, 1, "运行测试", t0);
+        assert_eq!(out[0], orca_a_state());
+        assert_eq!(
+            out.last().unwrap(),
+            &CompanionFrame::Result {
+                dict: 1,
+                status: Status::Ok,
+                text: "运行测试".into()
+            }
+        );
+        c.handle_frame(DeviceFrame::Undo, t0);
+        c.handle_frame(DeviceFrame::Submit, t0);
+        // Brought to the front, then delivered through the CLI (no paste).
+        assert_eq!(
+            c.orca.log,
+            [
+                "switch term_a",
+                "text term_a 运行测试",
+                "switch term_a",
+                "bs term_a 4",
+                "switch term_a",
+                "enter term_a"
+            ]
+        );
+        assert_eq!(
+            c.injector.log,
+            vec![format!("activate {ORCA_BUNDLE_ID}"); 3]
+        );
+    }
+
+    #[test]
+    fn orca_not_running_is_launched_for_insert_and_submit() {
+        let mut c = companion_elsewhere();
+        c.injector.running.remove(ORCA_BUNDLE_ID);
+        let t0 = Instant::now();
+        assert_eq!(hello(&mut c, t0)[1], orca_state("未运行，将自动启动"));
+        assert!(c.orca.log.is_empty(), "showing the Target never launches");
+        assert_eq!(c.target(), None);
+        let out = dictate(&mut c, 1, "继续", t0);
+        assert_eq!(
+            out.last().unwrap(),
+            &CompanionFrame::Result {
+                dict: 1,
+                status: Status::Ok,
+                text: "继续".into()
+            }
+        );
+        assert_eq!(c.orca.log, ["open", "switch term_a", "text term_a 继续"]);
+        // Orca quit again: the stored session labels the Target until the
+        // next Submit launches Orca.
+        c.take_outbox();
+        c.refresh(t0 + Duration::from_secs(2));
+        assert!(c.take_outbox().is_empty());
+        c.handle_frame(DeviceFrame::Submit, t0);
+        assert_eq!(c.orca.log[3..], ["open", "switch term_a", "enter term_a"]);
+    }
+
+    #[test]
+    fn orca_launch_failure_is_target_unavailable() {
+        let mut c = companion_elsewhere();
+        c.injector.running.remove(ORCA_BUNDLE_ID);
+        c.orca.open_fails = true;
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        let out = dictate(&mut c, 1, "继续", t0);
+        assert!(out.contains(&state(Status::TargetUnavailable, TargetKind::Orca, "Orca")));
+        assert!(out.contains(&CompanionFrame::Status {
+            code: StatusCode::OrcaUnavailable,
+            text: "Orca 不可用".into()
+        }));
+        assert_eq!(
+            out.last().unwrap(),
+            &CompanionFrame::Result {
+                dict: 1,
+                status: Status::TargetUnavailable,
+                text: String::new()
+            }
+        );
+        // Orca came up by other means: STATUS clears on the next Submit.
+        c.orca.open_fails = false;
+        c.injector.running.insert(ORCA_BUNDLE_ID.into());
+        c.handle_frame(DeviceFrame::Submit, t0);
+        let out = c.take_outbox();
+        assert!(out.contains(&CompanionFrame::Status {
+            code: StatusCode::Clear,
+            text: String::new()
+        }));
+        assert_eq!(out.last().unwrap(), &action(Action::Submit, Status::Ok));
+    }
+
+    #[test]
+    fn orca_without_current_conversation() {
+        let mut c = companion_elsewhere();
+        c.orca.snap.has_current = false;
+        let out = hello(&mut c, Instant::now());
+        assert_eq!(
+            out[1],
+            state(
+                Status::TargetUnavailable,
+                TargetKind::Orca,
+                "Orca · 没有会话"
+            )
+        );
+        c.handle_frame(DeviceFrame::Submit, Instant::now());
+        assert_eq!(
+            c.take_outbox().last().unwrap(),
+            &action(Action::Submit, Status::TargetUnavailable)
+        );
+    }
+
+    #[test]
+    fn gone_orca_session_is_replaced_silently() {
+        let mut c = companion_elsewhere();
+        // Restored Target whose handle Orca re-issued: found by its pane.
+        c.target = Some(StoredTarget::Orca {
+            handle: "term_old".into(),
+            leaf_id: "leaf_term_b".into(),
+            worktree: "my-passport".into(),
+            title: "server".into(),
+        });
+        let t0 = Instant::now();
+        assert_eq!(hello(&mut c, t0)[1], orca_state("my-passport · server"));
+        assert!(
+            matches!(c.target(), Some(StoredTarget::Orca { handle, .. }) if handle == "term_b")
+        );
+        // The pane closed: Orca's Current Conversation takes over.
+        c.orca.snap.sessions.remove(1);
+        let out = dictate(&mut c, 1, "继续", t0 + Duration::from_secs(1));
+        assert_eq!(out[0], orca_a_state());
+        assert_eq!(c.orca.log, ["switch term_a", "text term_a 继续"]);
+        assert!(
+            matches!(c.target(), Some(StoredTarget::Orca { handle, .. }) if handle == "term_a")
+        );
+    }
+
+    #[test]
+    fn focus_on_orca_targets_its_current_conversation() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
+        c.refresh(t0 + Duration::from_secs(2));
+        assert_eq!(c.take_outbox(), [orca_a_state()]);
+        // Orca shows another tab.
+        c.orca.snap.sessions.swap(0, 1);
+        c.refresh(t0 + Duration::from_secs(4));
+        assert_eq!(c.take_outbox(), [orca_state("my-passport · server")]);
+    }
+
+    #[test]
+    fn target_app_not_running_is_never_launched() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.injector.running.remove(WECHAT);
+        c.injector.frontmost = Some(GHOSTTY.into());
+        c.handle_frame(DeviceFrame::Submit, t0);
+        assert_eq!(
+            c.take_outbox(),
+            [
+                state(Status::TargetUnavailable, TargetKind::App, "微信"),
+                action(Action::Submit, Status::TargetUnavailable)
+            ]
+        );
+        assert!(c.injector.log.is_empty() && c.orca.log.is_empty());
+    }
+
+    #[test]
+    fn undo_uses_the_segment_destination() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        dictate(&mut c, 1, "你好", t0);
+        // Focus moves to Orca: the Target follows, Undo does not.
+        c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
+        c.refresh(t0 + Duration::from_secs(2));
+        c.handle_frame(DeviceFrame::Undo, t0);
+        assert_eq!(
+            c.injector.log.last().unwrap(),
+            &format!("delete {WECHAT} 2")
+        );
+        // The app quit: nothing is launched.
+        c.injector.frontmost = Some(WECHAT.into());
+        dictate(&mut c, 3, "你好", t0);
+        c.injector.running.remove(WECHAT);
+        c.take_outbox();
+        c.handle_frame(DeviceFrame::Undo, t0);
+        assert_eq!(
+            c.take_outbox(),
+            [action(Action::Undo, Status::TargetUnavailable)]
+        );
+    }
+
+    #[test]
+    fn root_list_marks_the_target_app() {
+        let mut c = companion();
+        let now = Instant::now();
+        hello(&mut c, now);
+        c.handle_frame(DeviceFrame::TargetsReq { list: 0 }, now);
+        let out = c.take_outbox();
+        let rows: Vec<(u8, String)> = out[..4]
+            .iter()
+            .map(|f| match f {
+                CompanionFrame::TargetItem {
+                    list: 0,
+                    count: 4,
+                    flags,
+                    label,
+                    ..
+                } => (*flags, label.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let s = FLAG_SUBLIST;
+        assert_eq!(
+            rows,
+            [
+                (s, "Orca".to_owned()),
+                (s | FLAG_CURRENT, "微信".to_owned()),
+                (s | FLAG_NOT_RUNNING, "ChatGPT".to_owned()),
+                (s | FLAG_NOT_RUNNING, "企业微信".to_owned()),
+            ]
+        );
+        assert_eq!(out[4], CompanionFrame::TargetEnd { list: 0, count: 4 });
+    }
+
+    #[test]
+    fn orca_list_current_first_then_jump() {
+        let mut c = companion();
+        let now = Instant::now();
+        hello(&mut c, now);
+        c.handle_frame(DeviceFrame::TargetsReq { list: 1 }, now);
+        let item = |index, flags, label: &str| CompanionFrame::TargetItem {
+            list: 1,
+            index,
+            count: 3,
+            flags,
+            label: label.into(),
+        };
+        assert_eq!(
+            c.take_outbox(),
+            [
+                item(0, FLAG_CURRENT, "my-passport · 语音输入"),
+                item(1, 0, "my-passport · server"),
+                item(2, 0, "voice-notes · PR"),
+                CompanionFrame::TargetEnd { list: 1, count: 3 },
+            ]
+        );
+        c.handle_frame(DeviceFrame::TargetSelect { list: 1, index: 2 }, now);
+        assert_eq!(c.take_outbox(), [orca_state("voice-notes · PR")]);
+        assert_eq!(c.orca.log, ["switch term_c"]);
+        assert_eq!(c.injector.log, [format!("activate {ORCA_BUNDLE_ID}")]);
+        // Orca is now frontmost; before it reports the new tab, following
+        // focus keeps the jumped-to session.
+        c.refresh(now + Duration::from_millis(1500));
+        assert!(c.take_outbox().is_empty());
+        let out = dictate(&mut c, 1, "继续", now + Duration::from_millis(1600));
+        assert_eq!(out[0], orca_state("voice-notes · PR"));
+        assert_eq!(c.orca.log.last().unwrap(), "text term_c 继续");
+        // A stale row: the reply reports the failure.
+        c.orca.snap.sessions.retain(|s| s.handle != "term_c");
+        c.handle_frame(DeviceFrame::TargetSelect { list: 1, index: 2 }, now);
+        assert!(matches!(
+            &c.take_outbox()[0],
+            CompanionFrame::TargetState {
+                status: Status::TargetUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn orca_list_launches_orca() {
+        let mut c = companion_elsewhere();
+        c.injector.running.remove(ORCA_BUNDLE_ID);
+        let now = Instant::now();
+        hello(&mut c, now);
+        c.handle_frame(DeviceFrame::TargetsReq { list: 1 }, now);
+        assert_eq!(c.orca.log, ["open"]);
+        assert_eq!(
+            c.take_outbox().last().unwrap(),
+            &CompanionFrame::TargetEnd { list: 1, count: 3 }
+        );
+        // Orca down: STATUS 3 (the Target is Orca) and an empty list.
+        c.injector.running.insert(ORCA_BUNDLE_ID.into());
+        c.orca.unavailable = true;
+        c.handle_frame(
+            DeviceFrame::TargetsReq { list: 1 },
+            now + Duration::from_secs(1),
+        );
+        let out = c.take_outbox();
+        assert!(out.contains(&CompanionFrame::Status {
+            code: StatusCode::OrcaUnavailable,
+            text: "Orca 不可用".into()
+        }));
+        assert_eq!(
+            out.last().unwrap(),
+            &CompanionFrame::TargetEnd { list: 1, count: 0 }
+        );
+    }
+
+    #[test]
+    fn app_lists_have_one_current_row_and_jump() {
+        let mut c = companion_elsewhere();
+        let now = Instant::now();
+        hello(&mut c, now);
+        c.handle_frame(DeviceFrame::TargetsReq { list: 2 }, now);
+        assert_eq!(
+            c.take_outbox(),
+            [
+                CompanionFrame::TargetItem {
+                    list: 2,
+                    index: 0,
+                    count: 1,
+                    flags: FLAG_CURRENT,
+                    label: "当前会话 · 张三".into()
+                },
+                CompanionFrame::TargetEnd { list: 2, count: 1 }
+            ]
+        );
+        c.handle_frame(DeviceFrame::TargetSelect { list: 2, index: 0 }, now);
+        assert_eq!(c.take_outbox(), [wechat_state()]);
+        assert_eq!(c.injector.log, [format!("activate {WECHAT}")]);
+        // ChatGPT is not running: empty list, never launched; a stray
+        // select reports it and keeps the Target.
+        c.handle_frame(DeviceFrame::TargetsReq { list: 3 }, now);
+        assert_eq!(
+            c.take_outbox(),
+            [CompanionFrame::TargetEnd { list: 3, count: 0 }]
+        );
+        c.handle_frame(DeviceFrame::TargetSelect { list: 3, index: 0 }, now);
+        assert_eq!(
+            c.take_outbox(),
+            [state(
+                Status::TargetUnavailable,
+                TargetKind::App,
+                "微信 · 张三"
+            )]
+        );
+        assert_eq!(c.injector.log.len(), 1);
+        // Unknown lists are empty; root selects just report the Target.
+        c.handle_frame(DeviceFrame::TargetsReq { list: 9 }, now);
+        assert_eq!(
+            c.take_outbox(),
+            [CompanionFrame::TargetEnd { list: 9, count: 0 }]
+        );
+        c.handle_frame(DeviceFrame::TargetSelect { list: 0, index: 1 }, now);
+        assert_eq!(c.take_outbox(), [wechat_state()]);
+    }
+
+    #[test]
+    fn refresh_sends_target_state_only_on_change() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        c.refresh(t0);
+        assert!(c.take_outbox().is_empty(), "nothing before HELLO");
+        hello(&mut c, t0);
+        c.refresh(t0 + Duration::from_secs(2));
+        assert!(c.take_outbox().is_empty(), "unchanged stays quiet");
+        c.injector.frontmost = Some(GHOSTTY.into());
+        c.refresh(t0 + Duration::from_secs(4));
+        assert!(
+            c.take_outbox().is_empty(),
+            "focus elsewhere keeps the Target"
+        );
+        // Accessibility revoked, then granted.
+        c.injector.trusted = false;
+        c.refresh(t0 + Duration::from_secs(8));
+        assert_eq!(
+            c.take_outbox(),
+            [
+                state(Status::Permission, TargetKind::App, "微信 · 张三"),
+                CompanionFrame::Status {
+                    code: StatusCode::AccessibilityPermission,
+                    text: "需要辅助功能权限".into()
+                }
+            ]
+        );
+        c.injector.trusted = true;
+        c.refresh(t0 + Duration::from_secs(10));
+        assert_eq!(
+            c.take_outbox(),
+            [
+                wechat_state(),
+                CompanionFrame::Status {
+                    code: StatusCode::Clear,
+                    text: String::new()
+                }
+            ]
+        );
+        // Not while dictating.
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        c.take_outbox();
+        c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
+        c.refresh(t0 + Duration::from_secs(12));
+        assert!(c.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn refresh_reuses_orca_snapshot() {
+        let mut c = companion_elsewhere();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        assert_eq!(c.orca.snapshots, 1);
+        // Orca Target in the background: reuse for 10 s.
+        c.refresh(t0 + Duration::from_secs(2));
+        c.refresh(t0 + Duration::from_secs(8));
+        assert_eq!(c.orca.snapshots, 1);
+        c.refresh(t0 + Duration::from_secs(10));
+        assert_eq!(c.orca.snapshots, 2);
+        // Orca frontmost: ask every 2 s.
+        c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
+        c.refresh(t0 + Duration::from_secs(11));
+        assert_eq!(c.orca.snapshots, 2);
+        c.refresh(t0 + Duration::from_secs(12));
+        assert_eq!(c.orca.snapshots, 3);
+        // An app Target never asks Orca.
+        c.injector.frontmost = Some(WECHAT.into());
+        c.refresh(t0 + Duration::from_secs(30));
+        c.injector.frontmost = Some(GHOSTTY.into());
+        c.refresh(t0 + Duration::from_secs(40));
+        c.handle_frame(DeviceFrame::Submit, t0 + Duration::from_secs(41));
+        assert_eq!(c.orca.snapshots, 3);
+    }
+
+    #[test]
+    fn target_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("vv-sess-{}", std::process::id()));
+        let path = dir.join("target.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = companion();
+        c.store = Some(path.clone());
+        hello(&mut c, Instant::now());
+        let stored = StoredTarget::load(&path);
+        assert_eq!(
+            stored,
+            Some(StoredTarget::App {
+                bundle_id: WECHAT.into()
+            })
+        );
+        let mut c2 = companion_elsewhere();
+        c2.target = stored;
+        assert_eq!(hello(&mut c2, Instant::now())[1], wechat_state());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hello_reports_missing_permissions() {
+        let mut c = companion();
+        c.injector.trusted = false;
+        let out = hello(&mut c, Instant::now());
+        assert_eq!(
+            out[1],
+            state(Status::Permission, TargetKind::App, "微信 · 张三")
+        );
+        assert!(matches!(
+            out[2],
+            CompanionFrame::Status {
+                code: StatusCode::AccessibilityPermission,
+                ..
+            }
+        ));
+        // An Orca Target does not need Accessibility.
+        let mut c = companion_elsewhere();
+        c.injector.trusted = false;
+        let out = hello(&mut c, Instant::now());
+        assert!(matches!(
+            out[2],
+            CompanionFrame::Status {
+                code: StatusCode::Clear,
+                ..
+            }
+        ));
+        c.recognizer.health = Some(RecognizerHealth::NoPermission);
+        let out = hello(&mut c, Instant::now());
+        assert!(matches!(
+            out[2],
+            CompanionFrame::Status {
+                code: StatusCode::SpeechPermission,
+                ..
+            }
+        ));
+    }
+    #[test]
     fn undo_once_counts_graphemes() {
         let mut c = companion();
         let t0 = Instant::now();
@@ -1731,32 +2404,15 @@ mod tests {
         assert_eq!(
             c.take_outbox(),
             [
-                CompanionFrame::ActionResult {
-                    action: Action::Undo,
-                    status: Status::Ok
-                },
-                CompanionFrame::ActionResult {
-                    action: Action::Undo,
-                    status: Status::NothingToUndo
-                },
+                action(Action::Undo, Status::Ok),
+                action(Action::Undo, Status::NothingToUndo),
             ]
         );
-        assert_eq!(c.injector.log.last().unwrap(), "delete None 7");
-        assert_eq!(undo_count("é"), 1);
-    }
-
-    #[test]
-    fn follow_focus_undo_targets_app_that_got_text() {
-        let mut c = companion();
-        c.injector.frontmost = Some("com.mitchellh.ghostty".into());
-        let t0 = Instant::now();
-        dictate(&mut c, 1, "你好", t0);
-        c.injector.frontmost = Some("com.tencent.xinWeChat".into());
-        c.handle_frame(DeviceFrame::Undo, t0);
         assert_eq!(
             c.injector.log.last().unwrap(),
-            "delete Some(\"com.mitchellh.ghostty\") 2"
+            &format!("delete {WECHAT} 7")
         );
+        assert_eq!(undo_count("é"), 1);
     }
 
     #[test]
@@ -1770,10 +2426,7 @@ mod tests {
         c.handle_frame(DeviceFrame::Undo, t0);
         assert_eq!(
             c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Undo,
-                status: Status::NothingToUndo
-            }]
+            [action(Action::Undo, Status::NothingToUndo)]
         );
     }
 
@@ -1787,303 +2440,8 @@ mod tests {
         c.handle_frame(DeviceFrame::Undo, t0);
         assert_eq!(
             c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Undo,
-                status: Status::NothingToUndo
-            }]
+            [action(Action::Undo, Status::NothingToUndo)]
         );
-    }
-
-    #[test]
-    fn submit_follow_focus() {
-        let mut c = companion();
-        c.handle_frame(DeviceFrame::Submit, Instant::now());
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Submit,
-                status: Status::Ok
-            }]
-        );
-        assert_eq!(c.injector.log, ["submit None"]);
-    }
-
-    #[test]
-    fn root_list_flags_and_app_selection() {
-        let mut c = companion();
-        let now = Instant::now();
-        c.handle_frame(DeviceFrame::TargetsReq { list: 0 }, now);
-        let out = c.take_outbox();
-        assert_eq!(out.len(), 9);
-        let flags: Vec<u8> = out[..8]
-            .iter()
-            .map(|f| match f {
-                CompanionFrame::TargetItem { flags, count, .. } => {
-                    assert_eq!(*count, 8);
-                    *flags
-                }
-                _ => panic!(),
-            })
-            .collect();
-        // follow(current), orca(sublist, Orca app not running), ghostty, cursor(nr),
-        // wechat, wework(nr), chatgpt(nr), codex(nr)
-        assert_eq!(flags, [1, 2 | 4, 0, 4, 0, 4, 4, 4]);
-        assert_eq!(out[8], CompanionFrame::TargetEnd { list: 0, count: 8 });
-
-        c.handle_frame(DeviceFrame::TargetSelect { list: 0, index: 4 }, now);
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::TargetState {
-                status: Status::Ok,
-                kind: TargetKind::App,
-                label: "微信 · com.tencent.xinWeChat-chat".into()
-            }]
-        );
-        assert_eq!(c.saved_state().selected.as_deref(), Some("wechat"));
-        dictate(&mut c, 1, "晚上吃什么", now);
-        c.handle_frame(DeviceFrame::Undo, now);
-        c.handle_frame(DeviceFrame::Submit, now);
-        assert_eq!(
-            c.injector.log,
-            [
-                "insert Some(\"com.tencent.xinWeChat\") 晚上吃什么",
-                "delete Some(\"com.tencent.xinWeChat\") 5",
-                "submit Some(\"com.tencent.xinWeChat\")"
-            ]
-        );
-    }
-
-    #[test]
-    fn app_not_running_is_unavailable_never_launched() {
-        let mut c = companion();
-        let now = Instant::now();
-        select(&mut c, 0, 3, now); // Cursor, not running
-        c.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: String::new(),
-            },
-            now,
-        );
-        let out = c.take_outbox();
-        assert_eq!(
-            out[1],
-            CompanionFrame::TargetState {
-                status: Status::TargetUnavailable,
-                kind: TargetKind::App,
-                label: "Cursor".into()
-            }
-        );
-        let out = dictate(&mut c, 1, "你好", now);
-        assert_eq!(
-            out.last().unwrap(),
-            &CompanionFrame::Result {
-                dict: 1,
-                status: Status::TargetUnavailable,
-                text: String::new()
-            }
-        );
-        c.handle_frame(DeviceFrame::Submit, now);
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Submit,
-                status: Status::TargetUnavailable
-            }]
-        );
-        assert!(c.injector.log.is_empty());
-    }
-
-    #[test]
-    fn app_path_resolution() {
-        let mut c = companion();
-        let now = Instant::now();
-        select(&mut c, 0, 7, now);
-        c.handle_frame(DeviceFrame::Submit, now);
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Submit,
-                status: Status::TargetUnavailable
-            }]
-        );
-        c.injector.running.insert("codex.desktop".into());
-        c.handle_frame(DeviceFrame::Submit, now);
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Submit,
-                status: Status::Ok
-            }]
-        );
-    }
-
-    #[test]
-    fn selecting_orca_row_keeps_target() {
-        let mut c = companion();
-        let now = Instant::now();
-        c.handle_frame(DeviceFrame::TargetsReq { list: 0 }, now);
-        c.take_outbox();
-        c.handle_frame(DeviceFrame::TargetSelect { list: 0, index: 1 }, now);
-        assert!(matches!(
-            &c.take_outbox()[0],
-            CompanionFrame::TargetState {
-                kind: TargetKind::FollowFocus,
-                ..
-            }
-        ));
-        c.handle_frame(DeviceFrame::TargetSelect { list: 0, index: 99 }, now);
-        assert!(matches!(
-            &c.take_outbox()[0],
-            CompanionFrame::TargetState {
-                kind: TargetKind::FollowFocus,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn orca_session_flow() {
-        let mut c = companion();
-        let now = Instant::now();
-        c.handle_frame(DeviceFrame::TargetsReq { list: 1 }, now);
-        assert_eq!(
-            c.take_outbox(),
-            [
-                CompanionFrame::TargetItem {
-                    list: 1,
-                    index: 0,
-                    count: 2,
-                    flags: 0,
-                    label: "my-passport · 语音输入".into()
-                },
-                CompanionFrame::TargetItem {
-                    list: 1,
-                    index: 1,
-                    count: 2,
-                    flags: 0,
-                    label: "voice-notes · PR".into()
-                },
-                CompanionFrame::TargetEnd { list: 1, count: 2 },
-            ]
-        );
-        c.handle_frame(DeviceFrame::TargetSelect { list: 1, index: 1 }, now);
-        assert_eq!(
-            c.take_outbox(),
-            [CompanionFrame::TargetState {
-                status: Status::Ok,
-                kind: TargetKind::OrcaSession,
-                label: "voice-notes · PR".into()
-            }]
-        );
-        assert_eq!(c.saved_state().selected.as_deref(), Some("orca"));
-        assert_eq!(c.saved_state().orca.as_ref().unwrap().handle, "term_b");
-        let out = dictate(&mut c, 1, "运行测试", now);
-        assert_eq!(
-            out.last().unwrap(),
-            &CompanionFrame::Result {
-                dict: 1,
-                status: Status::Ok,
-                text: "运行测试".into()
-            }
-        );
-        c.handle_frame(DeviceFrame::Undo, now);
-        c.handle_frame(DeviceFrame::Submit, now);
-        assert_eq!(
-            c.orca.log,
-            [
-                "switch term_b",
-                "text term_b 运行测试",
-                "switch term_b",
-                "bs term_b 4",
-                "enter term_b"
-            ]
-        );
-        assert!(c.injector.log.is_empty());
-        // Current flag in the sub-list.
-        c.take_outbox();
-        c.handle_frame(DeviceFrame::TargetsReq { list: 1 }, now);
-        assert!(matches!(
-            c.take_outbox()[1],
-            CompanionFrame::TargetItem {
-                flags: FLAG_CURRENT,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn orca_session_gone_or_down() {
-        let mut c = companion();
-        let now = Instant::now();
-        select(&mut c, 1, 0, now);
-        // Orca restarted: new handle, same pane.
-        c.orca.sessions[0].handle = "term_new".into();
-        let out = dictate(&mut c, 1, "继续", now);
-        assert!(matches!(
-            out[0],
-            CompanionFrame::TargetState {
-                status: Status::Ok,
-                ..
-            }
-        ));
-        assert_eq!(c.saved_state().orca.as_ref().unwrap().handle, "term_new");
-        // Pane closed.
-        c.orca.sessions.remove(0);
-        let out = dictate(&mut c, 2, "继续", now);
-        assert!(matches!(
-            out[0],
-            CompanionFrame::TargetState {
-                status: Status::TargetUnavailable,
-                kind: TargetKind::OrcaSession,
-                ..
-            }
-        ));
-        assert_eq!(
-            out.last().unwrap(),
-            &CompanionFrame::Result {
-                dict: 2,
-                status: Status::TargetUnavailable,
-                text: String::new()
-            }
-        );
-        // Orca down: STATUS 3 and an empty list.
-        c.orca.unavailable = true;
-        c.handle_frame(DeviceFrame::TargetsReq { list: 1 }, now);
-        let out = c.take_outbox();
-        assert!(out.contains(&CompanionFrame::Status {
-            code: StatusCode::OrcaUnavailable,
-            text: "Orca 不可用".into()
-        }));
-        assert_eq!(
-            out.last().unwrap(),
-            &CompanionFrame::TargetEnd { list: 1, count: 0 }
-        );
-    }
-
-    #[test]
-    fn persisted_selection_survives_restart() {
-        let dir = std::env::temp_dir().join(format!("vv-sess-{}", std::process::id()));
-        let path = dir.join("state.toml");
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut c = companion();
-        c.state_path = Some(path.clone());
-        select(&mut c, 0, 2, Instant::now());
-        let state = SavedState::load(&path);
-        assert_eq!(state.selected.as_deref(), Some("ghostty"));
-        let mut c2 = companion();
-        c2.state = state;
-        c2.handle_frame(
-            DeviceFrame::Hello {
-                ver: 1,
-                fw: String::new(),
-            },
-            Instant::now(),
-        );
-        assert!(
-            matches!(&c2.take_outbox()[1], CompanionFrame::TargetState { kind: TargetKind::App, label, .. } if label.starts_with("Ghostty"))
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2102,10 +2460,7 @@ mod tests {
         c.handle_frame(DeviceFrame::Undo, Instant::now());
         assert_eq!(
             c.take_outbox(),
-            [CompanionFrame::ActionResult {
-                action: Action::Undo,
-                status: Status::NothingToUndo
-            }]
+            [action(Action::Undo, Status::NothingToUndo)]
         );
     }
 

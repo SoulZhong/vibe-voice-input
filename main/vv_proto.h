@@ -1,4 +1,4 @@
-// main/vv_proto.h -- Vibe Voice BLE protocol v1 frames (docs/vibe-voice/protocol.md).
+// main/vv_proto.h -- Vibe Voice BLE protocol v2 frames (docs/vibe-voice/protocol.md).
 // Pure C: encoders for Device -> Companion frames, a decoder for Companion ->
 // Device frames. One frame per GATT write/notification, at most 180 bytes.
 #pragma once
@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VV_PROTO_VERSION     1
+#define VV_PROTO_VERSION     2
 #define VV_FRAME_MAX         180
 #define VV_AUDIO_SAMPLES     320   // 20 ms at 16 kHz
 #define VV_AUDIO_ADPCM_BYTES 160
@@ -58,16 +58,22 @@ enum {
     VV_COMPANION_NO_ZH_RECOGNIZER = 4,
 };
 
-// TARGET_ITEM flags.
+// TARGET_ITEM flags. CURRENT: in the root list the app the Target is in, in
+// a sub-list the app's Current Conversation.
 #define VV_ITEM_CURRENT     0x01
 #define VV_ITEM_SUBLIST     0x02
 #define VV_ITEM_NOT_RUNNING 0x04
 
-// TARGET_STATE kind.
-enum { VV_KIND_FOLLOW_FOCUS = 0, VV_KIND_APP = 1, VV_KIND_ORCA = 2 };
+// TARGET_STATE kind (0 is reserved).
+enum { VV_KIND_NONE = 0, VV_KIND_APP = 1, VV_KIND_ORCA = 2 };
 
-// TARGETS_REQ list ids.
-enum { VV_LIST_ROOT = 0, VV_LIST_ORCA = 1 };
+// TARGET_STATE app: Supported App index (root row order), or none.
+enum { VV_APP_ORCA = 0, VV_APP_WECHAT = 1, VV_APP_CHATGPT = 2, VV_APP_WECOM = 3, VV_APP_COUNT = 4 };
+#define VV_APP_NONE 0xFF
+
+// TARGETS_REQ list ids: 0 = the Supported Apps, n = conversations of root
+// row n - 1 (1 Orca, 2 WeChat, 3 ChatGPT, 4 WeCom).
+enum { VV_LIST_ROOT = 0, VV_LIST_ORCA = 1, VV_LIST_LAST = 4 };
 
 typedef struct {
     uint8_t len;
@@ -90,7 +96,7 @@ typedef struct {
     uint8_t type;
     uint8_t a;       // ver / code / dict / action / list / status
     uint8_t b;       // RESULT status / ACTION status / ITEM index / END count / STATE kind
-    uint8_t c;       // ITEM count
+    uint8_t c;       // ITEM count / STATE app
     uint8_t d;       // ITEM flags
     const char *text;
     size_t text_len;

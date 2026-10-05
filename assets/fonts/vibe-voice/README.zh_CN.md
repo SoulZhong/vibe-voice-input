@@ -12,7 +12,7 @@ GB2312 字符集，而不是只覆盖固定界面文字。
 | 文件 | 字号 / 位深 | 来源字重 | 覆盖范围 | Flash |
 | --- | --- | --- | --- | --- |
 | `vv_font_body_16.c` | 16 px，4 bpp，不压缩 | Noto Sans SC Regular | 完整 GB2312（6763 个汉字及其符号、假名、希腊/西里尔字母、制表符），ASCII `0x20-0x7E`，Latin-1 `0xA0-0xFF`，通用标点 `0x2010-0x2027` 与 `0x2030-0x203A`，CJK 标点 `0x3000-0x301F`，全角字符 `0xFF01-0xFF5E` 与 `0xFFE0-0xFFE6`：共 7648 个字形，行高 21 px | 约 958 KiB |
-| `vv_font_title_24.c` | 24 px，4 bpp | Noto Sans SC Medium | ASCII 加 `main/vv_strings.h` 中所有 `VV_H_*` 标题用到的字（136 个字形）；缺字回退到正文字库 | 约 23 KiB |
+| `vv_font_title_24.c` | 24 px，4 bpp | Noto Sans SC Medium | ASCII 加 `main/vv_strings.h` 中所有 `VV_H_*` 标题用到的字（140 个字形）；缺字回退到正文字库 | 约 23 KiB |
 | `vv_font_digits_48.c` | 48 px，4 bpp | Noto Sans SC Medium | `0-9` 与空格，用于配对码；回退到标题字库 | 约 4.4 KiB |
 
 回退链：数字 48 → 标题 24 → 正文 16。正文字库之外的码位（例如 emoji、GB2312

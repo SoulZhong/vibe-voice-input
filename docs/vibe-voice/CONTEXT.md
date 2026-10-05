@@ -14,15 +14,22 @@ _Avoid_: board, hardware, client
 The macOS app that pairs with the Device, recognizes speech, and acts on the **Target**.
 _Avoid_: host, server, daemon, helper
 
-**Target**:
-Where Segments go, chosen on the Device and kept until changed. Either an **App Target** or an **Orca Session**.
-_Avoid_: target window, destination
+**Supported App**:
+One of the apps Vibe Voice can deliver to, in this order: Orca, WeChat, ChatGPT, WeCom.
 
-**App Target**:
-A Mac app (or "follow focus") that is activated before its current input receives a paste. Its current conversation is whatever the app has open; it cannot be chosen from outside.
+**Current Conversation**:
+The conversation a Supported App has open right now. For Orca it is the **Orca Session** of the active tab in Orca's active worktree; for the other apps it is whatever chat the app shows, which cannot be chosen from outside.
+
+**Target**:
+The conversation that Inserts, Submits and Undos go to, shown on the Device. It follows Mac focus: whenever a Supported App is frontmost, the Target becomes that app's Current Conversation. While focus is elsewhere the Target stays where it was. It survives restarts; with no Target yet, it is Orca's Current Conversation (launching Orca if needed). If a targeted Orca Session closes, Orca's Current Conversation silently takes its place.
+_Avoid_: destination, target window
 
 **Orca Session**:
 One live Orca-managed terminal. Text is delivered directly to it without focus or paste.
+
+**Jump**:
+Choosing a conversation in the Device picker: it becomes the Target and is brought to the front. The picker opens with the Current Conversation highlighted.
+_Avoid_: pin
 
 **Target Title**:
 The name shown on the Device for the Target's current conversation (for example a chat partner's name), so the user sees where text will land before Submitting.
@@ -57,7 +64,8 @@ Ending a Dictation without inserting anything.
 - A **Dictation** produces zero or one **Segment** (zero when cancelled or silent).
 - **Undo** applies only to the latest **Segment** and only once.
 - An **Insert** never Submits; only the DOWN button Submits.
-- A **Target** whose app is not running is reported, never launched.
+- Mac focus on a Supported App and a **Jump** both set the **Target**; focus elsewhere leaves it unchanged.
+- Only Orca is ever launched automatically, as the default Target.
 
 ## Example dialogue
 

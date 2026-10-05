@@ -1,4 +1,4 @@
-//! Vibe Voice BLE protocol v1 codec (see `docs/vibe-voice/protocol.md`).
+//! Vibe Voice BLE protocol v2 codec (see `docs/vibe-voice/protocol.md`).
 //!
 //! Pure data handling: no I/O. Every encoded frame is at most [`MAX_FRAME`]
 //! bytes; text that does not fit is sent as its tail, cut on a UTF-8 boundary.
@@ -6,7 +6,7 @@
 use std::fmt;
 
 /// Protocol version carried in HELLO / HELLO_ACK.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 /// Maximum size of one frame (one GATT write or notification).
 pub const MAX_FRAME: usize = 180;
 /// Samples carried by one AUDIO frame (20 ms at 16 kHz).
@@ -69,18 +69,28 @@ pub enum StatusCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TargetKind {
-    FollowFocus = 0,
+    /// Reserved (v1 "follow focus"); never sent.
+    Unknown = 0,
+    /// The Current Conversation of a Supported App other than Orca.
     App = 1,
-    OrcaSession = 2,
+    /// Orca's Current Conversation (an Orca Session).
+    Orca = 2,
 }
 
-/// Which list a TARGETS_REQ / TARGET_ITEM refers to.
+/// Which list a TARGETS_REQ / TARGET_ITEM refers to: `0` is the root list of
+/// Supported Apps, `n` (1..=4) the conversations of root row `n - 1`.
 pub const LIST_ROOT: u8 = 0;
 pub const LIST_ORCA: u8 = 1;
 
+/// TARGET_STATE `app` when the Target is in no Supported App.
+pub const APP_NONE: u8 = 0xFF;
+
 /// TARGET_ITEM flags.
+/// Root list: the app the Target is in. Sub-list: the Current Conversation.
 pub const FLAG_CURRENT: u8 = 0x01;
+/// The row opens a sub-list (every root row).
 pub const FLAG_SUBLIST: u8 = 0x02;
+/// The app is not running.
 pub const FLAG_NOT_RUNNING: u8 = 0x04;
 
 /// ACTION_RESULT action codes.
@@ -152,6 +162,9 @@ pub enum CompanionFrame {
     TargetState {
         status: Status,
         kind: TargetKind,
+        /// Supported App index (0 Orca, 1 WeChat, 2 ChatGPT, 3 WeCom) or
+        /// [`APP_NONE`].
+        app: u8,
         label: String,
     },
 }
@@ -346,8 +359,12 @@ impl CompanionFrame {
             CompanionFrame::TargetState {
                 status,
                 kind,
+                app,
                 label,
-            } => with_text(vec![ty::TARGET_STATE, *status as u8, *kind as u8], label),
+            } => with_text(
+                vec![ty::TARGET_STATE, *status as u8, *kind as u8, *app],
+                label,
+            ),
         }
     }
 
@@ -446,11 +463,11 @@ impl CompanionFrame {
                 }
             }
             ty::TARGET_STATE => {
-                need(bytes, 3)?;
+                need(bytes, 4)?;
                 let kind = match bytes[2] {
-                    0 => TargetKind::FollowFocus,
+                    0 => TargetKind::Unknown,
                     1 => TargetKind::App,
-                    2 => TargetKind::OrcaSession,
+                    2 => TargetKind::Orca,
                     _ => {
                         return Err(DecodeError::Truncated {
                             ty: t,
@@ -461,7 +478,8 @@ impl CompanionFrame {
                 CompanionFrame::TargetState {
                     status: st(bytes[1])?,
                     kind,
-                    label: text(3)?,
+                    app: bytes[3],
+                    label: text(4)?,
                 }
             }
             other => return Err(DecodeError::UnknownType(other)),
@@ -528,6 +546,7 @@ mod tests {
                 CompanionFrame::TargetState {
                     status: Status::Ok,
                     kind: TargetKind::App,
+                    app: 1,
                     label: text.clone(),
                 },
             ] {
@@ -541,7 +560,7 @@ mod tests {
 
     #[test]
     fn companion_frames_byte_layout() {
-        assert_eq!(CompanionFrame::HelloAck { ver: 1 }.encode(), vec![0x81, 1]);
+        assert_eq!(CompanionFrame::HelloAck { ver: 2 }.encode(), vec![0x81, 2]);
         assert_eq!(
             CompanionFrame::Status {
                 code: StatusCode::AccessibilityPermission,
@@ -585,18 +604,19 @@ mod tests {
         assert_eq!(
             CompanionFrame::TargetState {
                 status: Status::TargetUnavailable,
-                kind: TargetKind::OrcaSession,
+                kind: TargetKind::Orca,
+                app: 0,
                 label: "o".into()
             }
             .encode(),
-            vec![0xB2, 3, 2, b'o']
+            vec![0xB2, 3, 2, 0, b'o']
         );
     }
 
     #[test]
     fn companion_roundtrip() {
         let frames = vec![
-            CompanionFrame::HelloAck { ver: 1 },
+            CompanionFrame::HelloAck { ver: 2 },
             CompanionFrame::Partial {
                 dict: 255,
                 text: "你好".into(),
@@ -611,6 +631,12 @@ mod tests {
                 status: Status::Ok,
             },
             CompanionFrame::TargetEnd { list: 1, count: 0 },
+            CompanionFrame::TargetState {
+                status: Status::Ok,
+                kind: TargetKind::App,
+                app: 3,
+                label: "企业微信 · 群".into(),
+            },
         ];
         for f in frames {
             assert_eq!(CompanionFrame::decode(&f.encode()).unwrap(), f);

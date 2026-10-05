@@ -5,7 +5,7 @@
 The AI Passport firmware in `main/` for Vibe Voice: voice input for vibe coding.
 It captures speech, streams it to the **Companion** over BLE, shows Partial Text
 and results, and sends button intents. Terms follow [`CONTEXT.md`](CONTEXT.md);
-the wire contract is [`protocol.md`](protocol.md) (v1), implemented without
+the wire contract is [`protocol.md`](protocol.md) (v2), implemented without
 extensions.
 
 This application replaces the baseline hardware-test menu: startup goes
@@ -22,6 +22,7 @@ longer compiles them into the firmware.
 | `main/vv_adpcm.c` | IMA-ADPCM encoder/decoder, matches `tests/vectors/adpcm_golden.txt` | No (host tested) |
 | `main/vv_text.c` | UTF-8 tail cut, sanitizing, wrap estimate, time/passkey formatting | No (host tested) |
 | `main/vv_strings.h` | Every fixed Chinese UI string | No |
+| `assets/icons/vibe-voice/vv_icons.c` | Supported App logos, 96 px and 20 px (generated, [README](../../assets/icons/vibe-voice/README.md)) | LVGL data only |
 | `main/vv_ble.c` | NimBLE peripheral, security, advertising, FIFO TX task | Yes |
 | `main/vv_audio.c` | Capture worker: 20 ms chunks → ADPCM → AUDIO frames | Yes |
 | `main/vv_ui.c` | LVGL screen | Yes |
@@ -36,11 +37,13 @@ state machine, executes actions and renders the UI while holding
 ## States and screens
 
 The screen is 240 × 320 portrait with a dark ink background. A persistent top
-bar shows the current Target label from TARGET_STATE (for example
+bar shows the Target label from TARGET_STATE (for example
 "WeChat · Zhang San", ellipsized when long) with a status dot — grey when unknown, mint
-when usable, amber with an amber outline when the Target is not running — and
+when usable, amber with an amber outline when the Target is not usable — and
 the battery percentage with a small battery glyph at top right (`--` and an
-empty glyph when the gauge returns `-1`). The bottom two lines show short
+empty glyph when the gauge returns `-1`). While dictating, waiting or showing a
+result, the 20 px logo of the Target's app (TARGET_STATE `app`) sits before the
+pill. The bottom two lines show short
 control hints, or a toast that temporarily replaces them.
 
 | State | Screen |
@@ -48,15 +51,16 @@ control hints, or a toast that temporarily replaces them.
 | No link (advertising) | Grey concentric rings, title `VV_H_NO_LINK` ("not connected"), `VV_T_NO_LINK_HINT` ("open Vibe Voice on the Mac and connect"), bottom line with the device name `VibeVoice-XXXX` |
 | Pairing | Title `VV_H_PAIRING` ("passkey"), the 6-digit passkey in 48 px blue digits (`482 913`), `VV_T_PAIRING_HINT` ("type this on the Mac"), device name |
 | Linking | Blue spinner, `VV_H_LINKING` ("connecting"), `VV_T_LINKING_HINT` ("waiting for the Mac"): secure link, HELLO sent, waiting for HELLO_ACK |
-| Idle | Mint rings with a filled core, `VV_H_IDLE` ("ready"); subtitle `VV_T_IDLE_HINT` ("press OK to speak"), or in amber the most important problem: protocol version mismatch, a Companion STATUS message (speech permission, accessibility permission, Orca CLI, zh-CN recognizer, or the Companion's text for unknown codes), or "Target not running" |
+| Idle | The Target app's 96 px logo (half transparent when the Target is not usable) with the conversation title below it (the label after `" · "`); without a known app, mint rings with a filled core and `VV_H_IDLE` ("ready"). Subtitle `VV_T_IDLE_HINT` ("press OK to speak"), or in amber the most important problem: protocol version mismatch, a Companion STATUS message (speech permission, accessibility permission, Orca CLI, zh-CN recognizer, or the Companion's text for unknown codes), or "Target not running" |
 | Dictating | Coral dot + `VV_H_DICTATING`, elapsed `MM:SS` (turns amber in the last 30 s), a 16-bar live microphone meter, and the latest Partial Text wrapped over up to 6 lines, showing its tail with a leading `…` when it does not fit |
 | Waiting for result | Mint spinner, `VV_H_WAITING` ("recognizing…"), the last two lines of Partial Text |
 | Result (transient) | `VV_H_INSERTED` ("inserted") with a card previewing the Segment tail (6 s), or an error title and explanation (4 s) for EMPTY, CANCELLED, TARGET_UNAVAILABLE, RECOGNIZER_ERROR, PERMISSION, a 20 s timeout, or an unknown status. Then back to Idle. |
-| Picker | `VV_H_PICKER_ROOT` (root list) or `VV_H_PICKER_ORCA` (list 1), position `n/N`, a 5-row window with the selection highlighted in mint; tags: a dot for current, an arrow for an item that opens a sub-list, amber `VV_T_NOT_RUNNING` for not running; loading and empty messages |
+| Picker | `VV_H_PICKER_ROOT` (the four Supported Apps, each row starting with its 20 px logo) or the sub-list title (`VV_H_PICKER_ORCA`, `VV_H_PICKER_WECHAT`, `VV_H_PICKER_CHATGPT`, `VV_H_PICKER_WECOM`), position `n/N`, a 5-row window with the cursor highlighted in mint; tags: amber `VV_T_NOT_RUNNING` for not running, a dot for current (the Target's app, or the Current Conversation), an arrow for a row that opens a sub-list; messages for loading, jumping (`VV_T_PICKER_JUMPING`), and an empty list (`VV_T_PICKER_NOT_RUN` when the app is not running, else `VV_T_PICKER_NO_CONV`) |
 
 Toasts: submitting → submitted, undoing → undone, nothing to undo, Target not
 running, macOS permission missing, failed (all from ACTION_RESULT), pairing
-failed, list failed to load. The exact Chinese text of every string is in
+failed, list failed to load, jumped (`VV_T_JUMPED`, or the failure toast when a
+Jump failed or timed out). The exact Chinese text of every string is in
 `main/vv_strings.h` and in the [Chinese version](firmware.zh_CN.md) of this page.
 
 ## Controls
@@ -68,9 +72,9 @@ or Undo twice.
 
 | State | UP | DOWN | OK click | OK long (500 ms) |
 | --- | --- | --- | --- | --- |
-| Idle / Result | Undo | Submit | Start Dictation | Open the Target picker |
+| Idle / Result | Undo | Submit | Start Dictation | Open the Jump picker |
 | Dictating | Cancel | — | Stop (Companion Inserts) | Stop (same as click) |
-| Picker | Move up (wraps; double = 2) | Move down (wraps; double = 2) | Select; an item with the sub-list flag opens list 1 (Orca Sessions) | Back to the root list from list 1; close from the root list |
+| Picker | Move up (wraps; double = 2) | Move down (wraps; double = 2) | Root row `i`: open list `i + 1` (that app's conversations); sub-list row: Jump | Back to the root list from a sub-list; close from the root list or while a Jump is pending |
 | No link, Pairing, Linking, Waiting | — | — | — | — |
 
 A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was pressed).
@@ -82,17 +86,24 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   300 ms) until its last frame is queued, then send DICT_STOP / DICT_CANCEL, so
   the Companion always sees them after the final AUDIO frame. `dict` increments
   per Dictation and wraps at 255.
-- **Waiting.** A RESULT is matched by `dict`. If none arrives within 20 s the
+- **Waiting.** A RESULT is matched by `dict`. If none arrives within 30 s (the
+  Companion may first launch Orca, up to 20 s) the
   Device shows the timeout result and ignores a later RESULT for that Dictation. After a
   local Cancel the Companion's CANCELLED RESULT is not shown again.
-- **Picker.** OK long sends TARGETS_REQ(0); TARGET_ITEM rows for the requested
-  list are stored (at most 24, labels cut to 71 bytes on a UTF-8 boundary)
-  until TARGET_END. The cursor starts on the item flagged current. Selecting a
-  normal item sends TARGET_SELECT(list, index) and closes the picker; the top bar
-  changes when TARGET_STATE arrives. A list that does not finish within 5 s
-  closes the picker with the list-failed toast.
+- **Picker (Jump).** OK long sends TARGETS_REQ(0); TARGET_ITEM rows for the
+  requested list are stored (at most 24, labels cut to 71 bytes on a UTF-8
+  boundary) until TARGET_END. The cursor starts on the row flagged current. The
+  root list is always the four Supported Apps in protocol order, so root row `i`
+  shows logo `i`. OK on root row `i` sends TARGETS_REQ(`i + 1`); OK on a sub-list
+  row sends TARGET_SELECT(list, index) and shows the jumping message until the
+  Companion's TARGET_STATE arrives, which closes the picker with the jumped toast
+  (or the failure toast for a non-OK status). A list that does not finish within
+  5 s (25 s for list 1, whose request may launch Orca) closes the picker with
+  the list-failed toast; a Jump without a reply within 5 s closes it with the
+  failed toast. A TARGET_STATE that is not a Jump reply only updates the top bar.
 - **Link loss.** A disconnect during a Dictation stops capture and sends
-  nothing; both sides abandon it (protocol rule). Any pending picker is dropped.
+  nothing; both sides abandon it (protocol rule). Any pending list or Jump is
+  dropped.
 - **Text safety.** All Companion text is sanitized before display: invalid
   UTF-8 bytes and control characters become `?`, `\r` is dropped, and long text
   keeps its tail on a character boundary.
@@ -149,6 +160,8 @@ Fonts are generated from Noto Sans SC (OFL 1.1); see
   picker items.
 - Title 24 px: ASCII plus the characters of the `VV_H_*` titles. Digits 48 px:
   the passkey.
+- Conversation titles under the Idle logo use the body font (they are arbitrary
+  text).
 - Characters outside the set (emoji, rare hanzi, vertical marks) render as
   LVGL's placeholder box; they are never silently dropped.
 - `python3 tools/vibe_fonts.py check` (part of the static gate) fails if any
@@ -162,6 +175,7 @@ Measured from the firmware build (ESP-IDF 5.5.3):
 | --- | --- |
 | Application image | ≈ 2.0 MB of the 8 MB factory partition (≈ 75 % free) |
 | Fonts (Flash, `.rodata`) | body 958 KiB, title 23 KiB, digits 4.4 KiB |
+| App logos (Flash, `.rodata`) | 113 KiB: 4 × 96 px (27 KiB each) and 4 × 20 px (1.2 KiB each), RGB565 + 8-bit alpha |
 | Static DRAM | 167 KiB of 321 KiB (includes the 48 KiB LVGL pool); ≈ 150 KiB left for heap before NimBLE (≈ 60 KiB), the 19 KiB LCD DMA buffer and task stacks |
 | LVGL pool | ≈ 31 KiB peak in a 64-bit host simulation of all screens (smaller on the 32-bit target) |
 
@@ -184,8 +198,9 @@ Flash and observe with the serial log. Report the firmware hash with results.
    percentage or `--`; log shows heap and LVGL pool lines.
 2. Advertising: a BLE scanner sees `VibeVoice-XXXX` with the NUS UUID.
 3. First pairing from the Mac: the 6-digit passkey appears large and readable;
-   entering it pairs; the screen moves through Linking to Idle and the top bar
-   shows the Target label.
+   entering it pairs; the screen moves through Linking to Idle, which shows the
+   Target app's logo and conversation title, and the top bar shows the Target
+   label.
 4. Wrong passkey or cancel on the Mac: pairing-failed toast, then No link.
 5. Reboot the Device: the Mac reconnects without a passkey.
 6. Dictation: OK → Dictating, timer runs, meter moves with speech, Chinese and
@@ -194,15 +209,22 @@ Flash and observe with the serial log. Report the firmware hash with results.
 7. DOWN → "submitted" toast and the Target receives Enter; UP → "undone"; UP
    again → "nothing to undo".
 8. UP while dictating → Cancelled result, nothing inserted.
-9. Long OK opens the picker; UP/DOWN move and wrap; OK on a normal item changes
-   the top bar; OK on the Orca item lists Orca Sessions; long OK goes back, then
-   closes. Not-running items show the amber tag.
-10. Companion STATUS codes 1–4 show the matching amber line in Idle; code 0 clears it.
-11. Turn Bluetooth off on the Mac during a Dictation: No link, audio stops, no
+9. Long OK opens the picker: four app rows with logos, the cursor on the
+   Target's app; UP/DOWN move and wrap. OK on Orca lists Orca Sessions with the
+   cursor on the Current Conversation (Orca launches first if it was not
+   running); OK on a session switches Orca to it, the picker closes with
+   "switched" and the logo and top bar follow. OK on WeChat shows one
+   "current conversation" row, or "app not running"; long OK goes back, then
+   closes. Not-running apps show the amber tag.
+10. Focus follows the Mac: bring WeChat or Orca to the front and within about
+    2 s the Idle logo, title and top bar change; focusing another app (for
+    example a browser) leaves them unchanged.
+11. Companion STATUS codes 1–4 show the matching amber line in Idle; code 0 clears it.
+12. Turn Bluetooth off on the Mac during a Dictation: No link, audio stops, no
     insert; reconnect works.
-12. Five-minute Dictation stops by itself (timer turns amber at 04:30).
-13. Audio quality: no crackles or gaps in the Companion's decoded audio; log
+13. Five-minute Dictation stops by itself (timer turns amber at 04:30).
+14. Audio quality: no crackles or gaps in the Companion's decoded audio; log
     `Dictation N: X frames, Y dropped` with Y near 0 at the negotiated interval.
-14. Glyphs: titles, hints, toasts, picker labels, mixed Chinese/English/digits
+15. Glyphs: titles, hints, toasts, picker labels, mixed Chinese/English/digits
     and fullwidth punctuation render without boxes; an emoji renders as a box.
-15. Repeat 20 Dictations: no heap decline in the `heap` log lines.
+16. Repeat 20 Dictations: no heap decline in the `heap` log lines.
