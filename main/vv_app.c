@@ -236,6 +236,51 @@ static void picker_jumped(vv_app_t *app, uint8_t status, uint32_t now_ms) {
 }
 
 // ---------------------------------------------------------------------------
+// Voice Notes Recording
+
+static vv_toast_t notes_toast(uint8_t notice) {
+    switch (notice) {
+    case VV_NOTICE_STARTED: return VV_TOAST_NOTES_STARTED;
+    case VV_NOTICE_STOPPED: return VV_TOAST_NOTES_STOPPED;
+    case VV_NOTICE_LAUNCH_FAILED: return VV_TOAST_NOTES_LAUNCH_FAILED;
+    case VV_NOTICE_START_FAILED: return VV_TOAST_NOTES_START_FAILED;
+    case VV_NOTICE_RISK_BLUETOOTH: return VV_TOAST_NOTES_RISK_BLUETOOTH;
+    case VV_NOTICE_RISK_VOICE_ISOLATION: return VV_TOAST_NOTES_RISK_VOICE_ISOLATION;
+    case VV_NOTICE_RISK_OTHER: return VV_TOAST_NOTES_RISK_OTHER;
+    case VV_NOTICE_NOT_INSTALLED: return VV_TOAST_NOTES_NOT_INSTALLED;
+    case VV_NOTICE_CONTROL_DISABLED: return VV_TOAST_NOTES_CONTROL_DISABLED;
+    case VV_NOTICE_STOP_FAILED: return VV_TOAST_NOTES_STOP_FAILED;
+    default: return VV_TOAST_NONE;
+    }
+}
+
+static void on_notes_state(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms) {
+    app->notes_state = msg->a <= VV_NOTES_STOPPING ? msg->a : VV_NOTES_IDLE;
+    app->notes_base_s = msg->u32;
+    app->notes_base_ms = now_ms;
+    app->notes_elapsed_s = msg->u32;
+    app->dirty |= VV_DIRTY_NOTES;
+    vv_toast_t toast = notes_toast(msg->c);
+    if (toast != VV_TOAST_NONE) {
+        bool warn = toast != VV_TOAST_NOTES_STARTED && toast != VV_TOAST_NOTES_STOPPED;
+        set_toast(app, toast, now_ms, warn ? VV_RESULT_ERR_MS : VV_TOAST_MS);
+    }
+}
+
+static void notes_tick(vv_app_t *app, uint32_t now_ms) {
+    if (app->notes_state != VV_NOTES_RECORDING) return;
+    uint32_t s = app->notes_base_s + (now_ms - app->notes_base_ms) / 1000u;
+    if (s != app->notes_elapsed_s) {
+        app->notes_elapsed_s = s;
+        app->dirty |= VV_DIRTY_NOTES;
+    }
+}
+
+bool vv_app_notes_active(const vv_app_t *app) {
+    return app->notes_state != VV_NOTES_IDLE;
+}
+
+// ---------------------------------------------------------------------------
 // Events
 
 static void drop_link(vv_app_t *app, vv_actions_t *out) {
@@ -244,6 +289,10 @@ static void drop_link(vv_app_t *app, vv_actions_t *out) {
     }
     app->dict_done = true;
     app->link_ready = false;
+    if (app->notes_state != VV_NOTES_IDLE) {
+        app->notes_state = VV_NOTES_IDLE;   // unknown until the next HELLO
+        app->dirty |= VV_DIRTY_NOTES;
+    }
     app->picker_loading = false;
     app->picker_jumping = false;
     app->picker_count = 0;
@@ -363,6 +412,9 @@ void vv_app_frame(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms, vv_action
     case VV_MSG_TARGET_END:
         picker_end(app, msg);
         break;
+    case VV_MSG_NOTES_STATE:
+        on_notes_state(app, msg, now_ms);
+        break;
     case VV_MSG_TARGET_STATE:
         app->target_known = true;
         app->target_status = msg->a;
@@ -380,6 +432,23 @@ void vv_app_frame(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms, vv_action
 void vv_app_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, uint32_t now_ms,
                    vv_actions_t *out) {
     clear_actions(out);
+    // Double OK toggles the Voice Notes Recording everywhere but the picker
+    // (and without a link). The button driver reports a double press only as
+    // DOUBLE, never as a CLICK first, so a Dictation is not stopped.
+    if (btn == VV_BTN_OK && press == VV_PRESS_DOUBLE) {
+        switch (app->state) {
+        case VV_ST_IDLE:
+        case VV_ST_RESULT:
+        case VV_ST_DICTATING:
+        case VV_ST_WAITING: {
+            vv_frame_t *f = push_frame(out);
+            if (f) vv_proto_simple(f, VV_MSG_NOTES_TOGGLE);
+            return;
+        }
+        default:
+            break;
+        }
+    }
     switch (app->state) {
     case VV_ST_IDLE:
     case VV_ST_RESULT:
@@ -416,6 +485,7 @@ void vv_app_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, uint32_t now_m
 
 void vv_app_tick(vv_app_t *app, uint32_t now_ms, vv_actions_t *out) {
     clear_actions(out);
+    notes_tick(app, now_ms);
     if (app->toast != VV_TOAST_NONE && vv_time_reached(now_ms, app->toast_until_ms)) {
         clear_toast(app);
     }

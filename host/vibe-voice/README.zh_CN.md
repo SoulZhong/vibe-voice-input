@@ -84,10 +84,29 @@ Target 保存在 `~/.config/vibe-voice/target.json`，Device 和 Companion 重�
 旧版本在同一目录写过 `targets.toml` 和 `state.toml`；现在不再读取，也不会改动它们。可选的
 `~/.config/vibe-voice/vocabulary.txt` 每行一个词，用于让识别偏向项目术语。
 
+## Voice Notes 录音
+
+在 Device 上双击 OK，会在 Mac 应用 Voice Notes（`com.teemo.voice-notes`）中开始一场会议录音，或
+停止进行中的录音。录音由 Mac 的麦克风采集，与听写互不影响：录音期间可以照常听写，听写中
+双击也绝不会结束听写。
+
+- Companion 通过 Voice Notes 的 socket
+  `~/Library/Application Support/com.teemo.voice-notes/mcp.sock`（或 `$VN_APP_DATA/mcp.sock`）
+  发送 `{"op":"status"}`、`{"op":"start"}`、`{"op":"stop"}`，并在独立线程上进行，听写音频从不
+  等待它。
+- Voice Notes 未运行时，开始录音会在后台启动它（`open -g -b com.teemo.voice-notes`），最多等
+  20 秒直到 socket 可用。
+- Voice Notes 必须允许控制：在其「AI」页开启「允许 AI 控制录制」，否则 Device 提示
+  `未允许控制录音`。
+- Voice Notes 报告的开录风险（蓝牙麦克风、语音突显）不会阻止录音，Device 会显示提醒。
+- Device 连接期间每 2 秒查询一次状态，因此在 Voice Notes 中开始、暂停或停止的录音也会显示在
+  Device 上。
+
 ## 诊断
 
 ```bash
 target/release/vibe-voice --check        # 权限与识别器状态
+target/release/vibe-voice --notes-status # Voice Notes 录音状态（只读）
 target/release/vibe-voice --orca-list    # Device 将看到的 Orca Session 列表，当前会话标 *
 # 把 16 kHz 单声道 16 位 WAV 经 ADPCM、协议逻辑和 Apple Speech 识别一遍。
 # 不会插入任何内容，只打印帧。
@@ -120,5 +139,6 @@ cat /tmp/sim.txt
 | `src/audio.rs` | AUDIO 帧转 PCM，丢帧处补静音 |
 | `src/session.rs` | Companion 状态机，依赖 `Injector` / `Recognizer` / `OrcaApi` trait |
 | `src/config.rs` | 支持的应用与保存的 Target（`target.json`） |
+| `src/voice_notes.rs` | Voice Notes socket 客户端、启动与工作线程 |
 | `src/orca.rs` | Orca CLI 客户端：从 `worktree ps` 与可视布局得出当前会话、启动、发送 |
 | `src/ble.rs`、`src/speech.rs`、`src/inject_macos.rs`、`src/ui.rs` | macOS 胶水层 |

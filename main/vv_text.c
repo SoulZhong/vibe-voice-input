@@ -120,3 +120,14 @@ void vv_format_passkey(uint32_t passkey, char out[8]) {
     passkey %= 1000000;
     snprintf(out, 8, "%03u %03u", (unsigned)(passkey / 1000), (unsigned)(passkey % 1000));
 }
+
+void vv_format_notes_elapsed(uint32_t s, char out[9]) {
+    if (s < 3600u) {
+        snprintf(out, 9, "%02u:%02u", (unsigned)(s / 60u), (unsigned)(s % 60u));
+        return;
+    }
+    uint32_t h = s / 3600u;
+    if (h > 99u) h = 99u;
+    snprintf(out, 9, "%u:%02u:%02u", (unsigned)h, (unsigned)(s / 60u % 60u),
+             (unsigned)(s % 60u));
+}

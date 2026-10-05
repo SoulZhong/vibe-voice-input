@@ -24,6 +24,7 @@ enum {
     VV_MSG_UNDO = 0x21,
     VV_MSG_TARGETS_REQ = 0x30,
     VV_MSG_TARGET_SELECT = 0x31,
+    VV_MSG_NOTES_TOGGLE = 0x40,
 };
 
 // Companion -> Device
@@ -36,6 +37,31 @@ enum {
     VV_MSG_TARGET_ITEM = 0xB0,
     VV_MSG_TARGET_END = 0xB1,
     VV_MSG_TARGET_STATE = 0xB2,
+    VV_MSG_NOTES_STATE = 0xC0,
+};
+
+// NOTES_STATE state: the Voice Notes Recording on the Mac.
+enum {
+    VV_NOTES_IDLE = 0,
+    VV_NOTES_RECORDING = 1,
+    VV_NOTES_PAUSED = 2,
+    VV_NOTES_STARTING = 3,
+    VV_NOTES_STOPPING = 4,
+};
+
+// NOTES_STATE notice: a one-off event shown as a toast.
+enum {
+    VV_NOTICE_NONE = 0,
+    VV_NOTICE_STARTED = 1,
+    VV_NOTICE_STOPPED = 2,
+    VV_NOTICE_LAUNCH_FAILED = 3,
+    VV_NOTICE_START_FAILED = 4,
+    VV_NOTICE_RISK_BLUETOOTH = 5,
+    VV_NOTICE_RISK_OTHER = 6,
+    VV_NOTICE_NOT_INSTALLED = 7,
+    VV_NOTICE_RISK_VOICE_ISOLATION = 8,
+    VV_NOTICE_CONTROL_DISABLED = 9,
+    VV_NOTICE_STOP_FAILED = 10,
 };
 
 // RESULT / ACTION_RESULT / TARGET_STATE status codes.
@@ -86,7 +112,7 @@ size_t vv_proto_hello(vv_frame_t *f, const char *fw);
 size_t vv_proto_dict(vv_frame_t *f, uint8_t type, uint8_t dict); // START/STOP/CANCEL
 size_t vv_proto_audio(vv_frame_t *f, uint8_t dict, uint16_t seq, int16_t pred,
                       uint8_t index, const uint8_t adpcm[VV_AUDIO_ADPCM_BYTES]);
-size_t vv_proto_simple(vv_frame_t *f, uint8_t type);              // SUBMIT/UNDO
+size_t vv_proto_simple(vv_frame_t *f, uint8_t type);              // SUBMIT/UNDO/NOTES_TOGGLE
 size_t vv_proto_targets_req(vv_frame_t *f, uint8_t list);
 size_t vv_proto_target_select(vv_frame_t *f, uint8_t list, uint8_t index);
 
@@ -94,10 +120,11 @@ size_t vv_proto_target_select(vv_frame_t *f, uint8_t list, uint8_t index);
 // terminated); `text_len` may be 0.
 typedef struct {
     uint8_t type;
-    uint8_t a;       // ver / code / dict / action / list / status
+    uint8_t a;       // ver / code / dict / action / list / status / NOTES state
     uint8_t b;       // RESULT status / ACTION status / ITEM index / END count / STATE kind
-    uint8_t c;       // ITEM count / STATE app
+    uint8_t c;       // ITEM count / STATE app / NOTES notice
     uint8_t d;       // ITEM flags
+    uint32_t u32;    // NOTES elapsed seconds
     const char *text;
     size_t text_len;
 } vv_msg_t;

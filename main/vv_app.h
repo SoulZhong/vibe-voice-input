@@ -12,6 +12,8 @@
 //   DICTATING audio streaming, Partial Text shown
 //   WAITING   DICT_STOP sent, waiting for RESULT
 //   RESULT    transient outcome (Segment preview or error); buttons act as IDLE
+// A double press of OK toggles a Voice Notes Recording (NOTES_TOGGLE) in every
+// linked state except PICKER; it never touches the Dictation.
 //   PICKER    Jump picker: the Supported Apps, then one app's conversations;
 //             choosing one sends TARGET_SELECT and closes on TARGET_STATE
 #pragma once
@@ -88,6 +90,16 @@ typedef enum {
     VV_TOAST_PAIR_FAILED,
     VV_TOAST_LIST_FAILED,
     VV_TOAST_JUMPED,
+    VV_TOAST_NOTES_STARTED,
+    VV_TOAST_NOTES_STOPPED,
+    VV_TOAST_NOTES_LAUNCH_FAILED,
+    VV_TOAST_NOTES_START_FAILED,
+    VV_TOAST_NOTES_RISK_BLUETOOTH,
+    VV_TOAST_NOTES_RISK_VOICE_ISOLATION,
+    VV_TOAST_NOTES_RISK_OTHER,
+    VV_TOAST_NOTES_NOT_INSTALLED,
+    VV_TOAST_NOTES_CONTROL_DISABLED,
+    VV_TOAST_NOTES_STOP_FAILED,
 } vv_toast_t;
 
 // Dirty flags for the UI.
@@ -98,7 +110,8 @@ typedef enum {
 #define VV_DIRTY_PICKER  0x10u
 #define VV_DIRTY_TOAST   0x20u
 #define VV_DIRTY_STATUS  0x40u
-#define VV_DIRTY_ALL     0x7Fu
+#define VV_DIRTY_NOTES   0x80u
+#define VV_DIRTY_ALL     0xFFu
 
 // Actions. The controller executes them in this order:
 //   1. AUDIO_STOP (capture stopped, every AUDIO frame queued)
@@ -156,6 +169,12 @@ typedef struct {
     vv_toast_t toast;
     uint32_t toast_until_ms;
 
+    // Voice Notes Recording (NOTES_STATE): counted locally while recording.
+    uint8_t notes_state;          // VV_NOTES_*
+    uint32_t notes_base_s;        // elapsed seconds in the last NOTES_STATE
+    uint32_t notes_base_ms;       // when it arrived
+    uint32_t notes_elapsed_s;     // shown
+
     uint8_t picker_list;
     uint8_t picker_parent_flags;   // flags of the root row that opened the sub-list
     bool picker_loading;
@@ -183,6 +202,9 @@ uint32_t vv_app_take_dirty(vv_app_t *app);
 // The conversation part of the Target label ("<App> · <title>" -> "<title>"),
 // or the whole label when it has no title; "" when the Target is unknown.
 const char *vv_app_target_title(const vv_app_t *app);
+
+// Whether a Voice Notes Recording is starting, running, paused or stopping.
+bool vv_app_notes_active(const vv_app_t *app);
 
 // Logo index for the Target (VV_APP_*), or -1 when unknown or out of range.
 int vv_app_target_logo(const vv_app_t *app);

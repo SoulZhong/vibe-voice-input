@@ -283,13 +283,48 @@ static void render_pill_logo(const vv_app_t *app) {
     lv_obj_set_width(ui.pill_label, on ? 68 : 92);
 }
 
+// While a Voice Notes Recording is active the pill shows it ("录音 12:34",
+// coral dot) instead of the Target label; the Target logo stays beside it and
+// the Idle page still shows the conversation. 68 px fits "录音 MM:SS" and
+// "录 H:MM:SS" in the 16 px body font.
+static void render_notes_pill(const vv_app_t *app) {
+    char time[9];
+    vv_format_notes_elapsed(app->notes_elapsed_s, time);
+    bool long_time = app->notes_elapsed_s >= 3600u;
+    switch (app->notes_state) {
+    case VV_NOTES_RECORDING:
+        lv_label_set_text_fmt(ui.pill_label, "%s %s",
+                              long_time ? VV_T_NOTES_REC_SHORT : VV_T_NOTES_REC, time);
+        break;
+    case VV_NOTES_PAUSED:
+        lv_label_set_text_fmt(ui.pill_label, "%s %s", VV_T_NOTES_PAUSED, time);
+        break;
+    case VV_NOTES_STARTING:
+        lv_label_set_text(ui.pill_label, VV_T_NOTES_STARTING);
+        break;
+    default:
+        lv_label_set_text(ui.pill_label, VV_T_NOTES_STOPPING);
+        break;
+    }
+    bool live = app->notes_state == VV_NOTES_RECORDING;
+    set_bg(ui.pill_dot, live ? C_CORAL : C_AMBER);
+    lv_obj_set_style_border_color(ui.pill, lv_color_hex(live ? C_CORAL : C_AMBER), 0);
+    lv_obj_set_style_border_width(ui.pill, 1, 0);
+    set_color(ui.pill_label, live ? C_CORAL : C_AMBER);
+}
+
 static void render_target(const vv_app_t *app) {
+    if (vv_app_notes_active(app)) {
+        render_notes_pill(app);
+        return;
+    }
     const char *label = app->target_known && app->target_label[0] ? app->target_label
                                                                   : VV_T_NO_TARGET;
     lv_label_set_text(ui.pill_label, label);
     bool down = app->target_known && app->target_status != VV_STATUS_OK;
     uint32_t dot = !app->target_known ? C_DIM : (down ? C_AMBER : C_MINT);
     set_bg(ui.pill_dot, dot);
+    lv_obj_set_style_border_color(ui.pill, lv_color_hex(C_AMBER), 0);
     lv_obj_set_style_border_width(ui.pill, down ? 1 : 0, 0);
     set_color(ui.pill_label, app->target_known ? C_TEXT : C_MUTED);
 }
@@ -472,6 +507,16 @@ static const char *toast_text(vv_toast_t toast, uint32_t *color) {
     case VV_TOAST_PAIR_FAILED: *color = C_CORAL; return VV_T_PAIR_FAILED;
     case VV_TOAST_LIST_FAILED: *color = C_AMBER; return VV_T_LIST_FAILED;
     case VV_TOAST_JUMPED: *color = C_MINT; return VV_T_JUMPED;
+    case VV_TOAST_NOTES_STARTED: *color = C_CORAL; return VV_T_NOTES_STARTED;
+    case VV_TOAST_NOTES_STOPPED: *color = C_MINT; return VV_T_NOTES_STOPPED;
+    case VV_TOAST_NOTES_LAUNCH_FAILED: *color = C_CORAL; return VV_T_NOTES_LAUNCH;
+    case VV_TOAST_NOTES_START_FAILED: *color = C_CORAL; return VV_T_NOTES_FAILED;
+    case VV_TOAST_NOTES_RISK_BLUETOOTH: *color = C_AMBER; return VV_T_NOTES_RISK_BT;
+    case VV_TOAST_NOTES_RISK_VOICE_ISOLATION: *color = C_AMBER; return VV_T_NOTES_RISK_VI;
+    case VV_TOAST_NOTES_RISK_OTHER: *color = C_AMBER; return VV_T_NOTES_RISK;
+    case VV_TOAST_NOTES_NOT_INSTALLED: *color = C_AMBER; return VV_T_NOTES_MISSING;
+    case VV_TOAST_NOTES_CONTROL_DISABLED: *color = C_AMBER; return VV_T_NOTES_DENIED;
+    case VV_TOAST_NOTES_STOP_FAILED: *color = C_CORAL; return VV_T_NOTES_STOP_FAIL;
     case VV_TOAST_NONE: break;
     }
     return NULL;
@@ -606,7 +651,7 @@ static void render_state(const vv_app_t *app) {
 }
 
 void vv_ui_render(const vv_app_t *app, uint32_t dirty) {
-    if (dirty & VV_DIRTY_TARGET) render_target(app);
+    if (dirty & (VV_DIRTY_TARGET | VV_DIRTY_NOTES)) render_target(app);
     if (dirty & (VV_DIRTY_STATE | VV_DIRTY_TARGET)) render_pill_logo(app);
     if (dirty & (VV_DIRTY_STATE | VV_DIRTY_STATUS | VV_DIRTY_TARGET)) {
         render_state(app);

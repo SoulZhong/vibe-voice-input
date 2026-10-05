@@ -108,10 +108,32 @@ they are no longer read and are left untouched. Optional
 `~/.config/vibe-voice/vocabulary.txt` adds one phrase per line to bias
 recognition toward your project's terms.
 
+## Voice Notes Recording
+
+Double-pressing OK on the Device starts a meeting recording in the Mac app
+Voice Notes (`com.teemo.voice-notes`), or stops the one in progress. It is
+recorded by the Mac's microphone and is independent of Dictation: you can
+dictate while it records, and a double press while dictating never ends the
+Dictation.
+
+- The Companion talks to Voice Notes over its socket
+  `~/Library/Application Support/com.teemo.voice-notes/mcp.sock` (or
+  `$VN_APP_DATA/mcp.sock`) with `{"op":"status"}`, `{"op":"start"}` and
+  `{"op":"stop"}`, on a separate thread, so Dictation audio never waits for it.
+- If Voice Notes is not running, a start launches it in the background
+  (`open -g -b com.teemo.voice-notes`) and waits up to 20 s for the socket.
+- Voice Notes must allow control: enable "allow AI to control recording" on
+  its AI page, otherwise the Device shows the control-not-allowed toast.
+- Start risks reported by Voice Notes (Bluetooth microphone, Voice Isolation)
+  do not stop the recording; the Device shows a warning toast.
+- The status is polled every 2 s while the Device is linked, so recordings
+  started, paused or stopped in Voice Notes show on the Device too.
+
 ## Diagnostics
 
 ```bash
 target/release/vibe-voice --check        # permission and recognizer status
+target/release/vibe-voice --notes-status # Voice Notes recording status (read-only)
 target/release/vibe-voice --orca-list    # Orca Sessions as the Device sees them, Current Conversation marked *
 # Recognize a 16 kHz mono 16-bit WAV through ADPCM, protocol and Apple Speech.
 # Nothing is inserted; frames are printed.
@@ -145,5 +167,6 @@ Logs go to `~/Library/Logs/VibeVoice.log` when started from Finder (add
 | `src/audio.rs` | AUDIO frames to PCM, silence for lost frames |
 | `src/session.rs` | Companion state machine behind `Injector` / `Recognizer` / `OrcaApi` traits |
 | `src/config.rs` | Supported Apps and the stored Target (`target.json`) |
+| `src/voice_notes.rs` | Voice Notes socket client, launch, and the worker thread |
 | `src/orca.rs` | Orca CLI client: Current Conversation from `worktree ps` and visual layouts, launch, send |
 | `src/ble.rs`, `src/speech.rs`, `src/inject_macos.rs`, `src/ui.rs` | macOS glue |

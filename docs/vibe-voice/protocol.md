@@ -46,6 +46,7 @@ byte 1.. payload (type specific)
 | `0x21` | UNDO | — | Remove the latest Segment from the Target. Reply ACTION_RESULT. |
 | `0x30` | TARGETS_REQ | `list u8` | Ask for a picker list. `0` = the Supported Apps; `n` (1–4) = the conversations of root row `n - 1`: `1` Orca Sessions, `2` WeChat, `3` ChatGPT, `4` WeCom. |
 | `0x31` | TARGET_SELECT | `list u8`, `index u8` | Jump to a row of the last list sent. Reply TARGET_STATE. |
+| `0x40` | NOTES_TOGGLE | — | Start a Voice Notes Recording when none is active, else stop it (double OK). Reply NOTES_STATE. |
 
 ### Companion → Device
 
@@ -59,6 +60,7 @@ byte 1.. payload (type specific)
 | `0xB0` | TARGET_ITEM | `list u8`, `index u8`, `count u8`, `flags u8`, `label text` | One list row. `flags`: bit0 current (root list: the app the Target is in; sub-list: the app's Current Conversation), bit1 opens a sub-list, bit2 app not running. |
 | `0xB1` | TARGET_END | `list u8`, `count u8` | List complete. |
 | `0xB2` | TARGET_STATE | `status u8`, `kind u8`, `app u8`, `label text` | The Target. `kind`: 1 a Supported App's Current Conversation, 2 an Orca Session (0 reserved). `app`: the Supported App it is in, `0` Orca, `1` WeChat, `2` ChatGPT, `3` WeCom, `0xFF` none; the Device shows that app's logo. `label` is `"<app> · <Target Title>"` when a title is known. |
+| `0xC0` | NOTES_STATE | `state u8`, `elapsed_s u32`, `notice u8` | The Voice Notes Recording (7 bytes). `state`: 0 idle, 1 recording, 2 paused, 3 starting, 4 stopping. `elapsed_s`: recording time so far (paused time excluded); the Device counts on from it while recording. `notice`: a one-off event for a toast, see below. |
 
 ### Status codes
 
@@ -76,6 +78,12 @@ RESULT / ACTION_RESULT / TARGET_STATE `status`:
 
 STATUS `code`: 0 clear, 1 speech permission missing, 2 accessibility permission
 missing, 3 Orca CLI unavailable, 4 recognizer unavailable for `zh-CN`.
+
+NOTES_STATE `notice`: 0 none, 1 started, 2 stopped, 3 Voice Notes did not
+launch in time, 4 start failed, 5 started with a Bluetooth microphone (risk
+`bluetooth_mic`), 6 started with another risk, 7 Voice Notes not installed,
+8 started with Voice Isolation on (risk `voice_isolation`), 9 control disabled
+in Voice Notes ("allow AI to control recording" off), 10 stop failed.
 
 ## Audio
 
@@ -148,3 +156,22 @@ missing, 3 Orca CLI unavailable, 4 recognizer unavailable for `zh-CN`.
   `~/.config/vibe-voice/target.json`, so it survives Device and Companion
   restarts.
 - If the link drops during a Dictation, both sides abandon it without inserting.
+- **Voice Notes Recording.** A meeting recording in the Mac app Voice Notes
+  (`com.teemo.voice-notes`), captured by the Mac's microphone. It is
+  independent of Dictation: NOTES_TOGGLE is accepted while dictating and never
+  ends the Dictation, and Voice Notes never changes the Target, Undo or any
+  Dictation frame. The Companion talks to Voice Notes over its Unix socket
+  `<app data>/mcp.sock` (`{"op":"status"|"start"|"stop"}`), always on a worker
+  thread, so audio and PARTIAL frames keep flowing while Voice Notes launches
+  or loads its model.
+- On NOTES_TOGGLE the Companion replies NOTES_STATE starting (3) or stopping
+  (4) at once, then NOTES_STATE with the outcome and a notice. A start launches
+  Voice Notes in the background if it is not running (`open -g -b`, up to 20 s
+  until its socket answers); start risks do not prevent recording, they are
+  reported as notices 5, 6 or 8. A toggle while starting or stopping only
+  repeats the current NOTES_STATE.
+- NOTES_STATE is sent after HELLO_ACK (after TARGET_STATE and STATUS), after
+  every toggle, and when the Companion's 2 s status poll (while linked, also
+  during a Dictation) finds the state changed or the Device's count off by more
+  than 2 s, so recordings started, paused or stopped on the Mac show too. The
+  Device forgets the state on link loss.

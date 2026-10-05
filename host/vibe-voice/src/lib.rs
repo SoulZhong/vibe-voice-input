@@ -10,6 +10,8 @@ pub mod config;
 pub mod orca;
 pub mod protocol;
 pub mod session;
+#[cfg(unix)]
+pub mod voice_notes;
 
 #[cfg(target_os = "macos")]
 pub mod ble;

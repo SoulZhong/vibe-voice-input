@@ -68,6 +68,23 @@
 #define VV_T_LIST_FAILED      "列表加载失败"
 #define VV_T_JUMPED           "已切换"
 
+// Voice Notes Recording: top bar ("录音 12:34") and toasts.
+#define VV_T_NOTES_REC        "录音"
+#define VV_T_NOTES_REC_SHORT  "录"
+#define VV_T_NOTES_PAUSED     "暂停"
+#define VV_T_NOTES_STARTING   "启动中…"
+#define VV_T_NOTES_STOPPING   "停止中…"
+#define VV_T_NOTES_STARTED    "已开始录音"
+#define VV_T_NOTES_STOPPED    "录音已停止"
+#define VV_T_NOTES_LAUNCH     "Voice Notes 启动失败"
+#define VV_T_NOTES_FAILED     "录音失败"
+#define VV_T_NOTES_RISK_BT    "注意：蓝牙麦克风"
+#define VV_T_NOTES_RISK_VI    "注意：语音突显已开启"
+#define VV_T_NOTES_RISK       "注意：录音环境有风险"
+#define VV_T_NOTES_MISSING    "未安装 Voice Notes"
+#define VV_T_NOTES_DENIED     "未允许控制录音"
+#define VV_T_NOTES_STOP_FAIL  "停止录音失败"
+
 // Companion STATUS codes (protocol section "Status codes").
 #define VV_T_STATUS_SPEECH    "未授予语音识别权限"
 #define VV_T_STATUS_AX        "未授予辅助功能权限"

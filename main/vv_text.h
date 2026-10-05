@@ -39,5 +39,9 @@ size_t vv_text_fit_tail(const char *s, size_t len, const vv_wrap_t *wrap);
 // "MM:SS" (minutes saturate at 99). `out` must hold 6 bytes.
 void vv_format_elapsed(uint32_t ms, char out[6]);
 
+// Voice Notes Recording time: "MM:SS" below one hour, else "H:MM:SS"
+// (hours capped at 99).
+void vv_format_notes_elapsed(uint32_t s, char out[9]);
+
 // "123 456". `out` must hold 8 bytes.
 void vv_format_passkey(uint32_t passkey, char out[8]);

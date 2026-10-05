@@ -7,6 +7,7 @@
 //!                                  Apple Speech; prints frames, inserts nothing
 //!   vibe-voice --orca-list         print Orca Sessions as the Device sees them,
 //!                                  Current Conversation first (read-only)
+//!   vibe-voice --notes-status      print the Voice Notes recording status (read-only)
 //!   vibe-voice --check             print permission and recognizer status
 
 #[cfg(not(target_os = "macos"))]

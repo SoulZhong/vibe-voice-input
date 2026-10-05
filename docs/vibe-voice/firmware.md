@@ -43,7 +43,13 @@ when usable, amber with an amber outline when the Target is not usable — and
 the battery percentage with a small battery glyph at top right (`--` and an
 empty glyph when the gauge returns `-1`). Whenever the Target is known, the 20 px
 logo of the Target's app (TARGET_STATE `app`) sits at the top left before the
-pill. The bottom two lines show short
+pill. While a Voice Notes Recording is active the pill shows it instead of the
+Target label, on every page: a coral dot and outline with `VV_T_NOTES_REC` and
+the time (`MM:SS`, or `VV_T_NOTES_REC_SHORT` with `H:MM:SS` from one hour), in
+amber `VV_T_NOTES_PAUSED` with the time when paused, `VV_T_NOTES_STARTING` or
+`VV_T_NOTES_STOPPING` while Voice Notes works; the Target logo stays beside it
+and Idle still shows the conversation. The time comes from NOTES_STATE and is
+counted on locally each second while recording. The bottom two lines show short
 control hints, or a toast that temporarily replaces them.
 
 | State | Screen |
@@ -54,28 +60,38 @@ control hints, or a toast that temporarily replaces them.
 | Idle | The Target app's 96 px logo (half transparent when the Target is not usable) with the conversation title below it (the label after `" · "`); without a known app, mint rings with a filled core and `VV_H_IDLE` ("ready"). Subtitle `VV_T_IDLE_HINT` ("press OK to speak"), or in amber the most important problem: protocol version mismatch, a Companion STATUS message (speech permission, accessibility permission, Orca CLI, zh-CN recognizer, or the Companion's text for unknown codes), or "Target not running" |
 | Dictating | Coral dot + `VV_H_DICTATING`, elapsed `MM:SS` (turns amber in the last 30 s), a 16-bar live microphone meter, and the latest Partial Text wrapped over up to 6 lines, showing its tail with a leading `…` when it does not fit |
 | Waiting for result | Mint spinner, `VV_H_WAITING` ("recognizing…"), the last two lines of Partial Text |
-| Result (transient) | `VV_H_INSERTED` ("inserted") with a card previewing the Segment tail (6 s), or an error title and explanation (4 s) for EMPTY, CANCELLED, TARGET_UNAVAILABLE, RECOGNIZER_ERROR, PERMISSION, a 20 s timeout, or an unknown status. Then back to Idle. |
+| Result (transient) | `VV_H_INSERTED` ("inserted") with a card previewing the Segment tail (6 s), or an error title and explanation (4 s) for EMPTY, CANCELLED, TARGET_UNAVAILABLE, RECOGNIZER_ERROR, PERMISSION, an unknown status, or a 30 s timeout. Then back to Idle. |
 | Picker | `VV_H_PICKER_ROOT` (the four Supported Apps, each row starting with its 20 px logo) or the sub-list title (`VV_H_PICKER_ORCA`, `VV_H_PICKER_WECHAT`, `VV_H_PICKER_CHATGPT`, `VV_H_PICKER_WECOM`), position `n/N`, a 5-row window with the cursor highlighted in mint; tags: amber `VV_T_NOT_RUNNING` for not running, a dot for current (the Target's app, or the Current Conversation), an arrow for a row that opens a sub-list; messages for loading, jumping (`VV_T_PICKER_JUMPING`), and an empty list (`VV_T_PICKER_NOT_RUN` when the app is not running, else `VV_T_PICKER_NO_CONV`) |
 
 Toasts: submitting → submitted, undoing → undone, nothing to undo, Target not
 running, macOS permission missing, failed (all from ACTION_RESULT), pairing
 failed, list failed to load, jumped (`VV_T_JUMPED`, or the failure toast when a
-Jump failed or timed out). The exact Chinese text of every string is in
+Jump failed or timed out), and the Voice Notes notices from NOTES_STATE:
+started, stopped, launch failed, start failed, not installed, control not
+allowed, stop failed, and the start risks (Bluetooth microphone, Voice
+Isolation, other); the failure and risk toasts stay 4 s. The exact Chinese text of every string is in
 `main/vv_strings.h` and in the [Chinese version](firmware.zh_CN.md) of this page.
 
 ## Controls
 
 Short presses act on the button component's CLICK event; it fires about 180 ms
 after release, because the component waits that long to rule out a double click.
-DOUBLE is ignored except in the picker, so a quick double tap can never Submit
-or Undo twice.
+A double press of OK toggles a Voice Notes Recording (NOTES_TOGGLE) in Idle,
+Result, Dictating and Waiting; other DOUBLE presses are ignored except UP/DOWN
+in the picker, so a quick double tap can never Submit or Undo twice. The
+button component (`espressif/button` 4.2.0) decides between SINGLE_CLICK and
+DOUBLE_CLICK only after the short-press window following the last release, so a
+double press reports DOUBLE alone, never a CLICK first: double-pressing during a
+Dictation toggles Voice Notes and leaves the Dictation running. Two presses
+slower than that window are two clicks.
 
 | State | UP | DOWN | OK click | OK long (500 ms) |
 | --- | --- | --- | --- | --- |
-| Idle / Result | Undo | Submit | Start Dictation | Open the Jump picker |
-| Dictating | Cancel | — | Stop (Companion Inserts) | Stop (same as click) |
+| Idle / Result | Undo | Submit | Start Dictation; double: toggle Voice Notes | Open the Jump picker |
+| Dictating | Cancel | — | Stop (Companion Inserts); double: toggle Voice Notes, the Dictation continues | Stop (same as click) |
+| Waiting | — | — | Double: toggle Voice Notes | — |
 | Picker | Move up (wraps; double = 2) | Move down (wraps; double = 2) | Root row `i`: open list `i + 1` (that app's conversations); sub-list row: Jump | Back to the root list from a sub-list; close from the root list or while a Jump is pending |
-| No link, Pairing, Linking, Waiting | — | — | — | — |
+| No link, Pairing, Linking | — | — | — | — |
 
 A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was pressed).
 
@@ -101,9 +117,12 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   5 s (25 s for list 1, whose request may launch Orca) closes the picker with
   the list-failed toast; a Jump without a reply within 5 s closes it with the
   failed toast. A TARGET_STATE that is not a Jump reply only updates the top bar.
+- **Voice Notes Recording.** Independent of Dictation: it records with the
+  Mac's microphone, and NOTES_STATE never changes the state, the Dictation, the
+  Target or the picker; it only updates the top bar and may show a toast.
 - **Link loss.** A disconnect during a Dictation stops capture and sends
   nothing; both sides abandon it (protocol rule). Any pending list or Jump is
-  dropped.
+  dropped, and the Voice Notes state is cleared until the next HELLO.
 - **Text safety.** All Companion text is sanitized before display: invalid
   UTF-8 bytes and control characters become `?`, `\r` is dropped, and long text
   keeps its tail on a character boundary.
@@ -228,3 +247,9 @@ Flash and observe with the serial log. Report the firmware hash with results.
 15. Glyphs: titles, hints, toasts, picker labels, mixed Chinese/English/digits
     and fullwidth punctuation render without boxes; an emoji renders as a box.
 16. Repeat 20 Dictations: no heap decline in the `heap` log lines.
+17. Voice Notes: double OK in Idle starts a recording in Voice Notes (launched
+    in the background if needed); the top bar shows the coral recording time on
+    every page and it keeps counting; a Bluetooth microphone shows the risk
+    toast. Dictate meanwhile: text still lands in the Target. Double OK while
+    dictating stops the recording and the Dictation continues. Starting or
+    stopping in Voice Notes on the Mac shows on the Device within about 2 s.

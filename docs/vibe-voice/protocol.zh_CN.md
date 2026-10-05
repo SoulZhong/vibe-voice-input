@@ -37,6 +37,7 @@
 | `0x21` | UNDO | — | 从目标删除最近一个片段，回复 ACTION_RESULT。 |
 | `0x30` | TARGETS_REQ | `list u8` | 请求选择页列表。`0` 为支持的应用；`n`（1–4）为根列表第 `n - 1` 行应用的会话：`1` Orca 会话，`2` 微信，`3` ChatGPT，`4` 企业微信。 |
 | `0x31` | TARGET_SELECT | `list u8`、`index u8` | 跳转到最近收到的列表中的一行，回复 TARGET_STATE。 |
+| `0x40` | NOTES_TOGGLE | — | 没有进行中的 Voice Notes 录音时开始录音，否则停止（双击 OK）。回复 NOTES_STATE。 |
 
 ### 配套程序 → 设备
 
@@ -50,6 +51,7 @@
 | `0xB0` | TARGET_ITEM | `list u8`、`index u8`、`count u8`、`flags u8`、`label 文本` | 列表中的一行。`flags`：bit0 当前（根列表：目标所在的应用；子列表：该应用的当前会话），bit1 可进入子列表，bit2 应用未运行。 |
 | `0xB1` | TARGET_END | `list u8`、`count u8` | 列表结束。 |
 | `0xB2` | TARGET_STATE | `status u8`、`kind u8`、`app u8`、`label 文本` | 目标。`kind`：1 支持的应用的当前会话，2 Orca 会话（0 保留）。`app`：目标所在的支持的应用，`0` Orca，`1` 微信，`2` ChatGPT，`3` 企业微信，`0xFF` 无；设备据此显示应用图标。已知标题时 `label` 为 `"<应用> · <目标标题>"`。 |
+| `0xC0` | NOTES_STATE | `state u8`、`elapsed_s u32`、`notice u8` | Voice Notes 录音状态（7 字节）。`state`：0 空闲，1 录音中，2 已暂停，3 启动中，4 停止中。`elapsed_s`：已录时长（不含暂停），录音中设备据此继续计时。`notice`：用于提示条的一次性事件，见下。 |
 
 ### 状态码
 
@@ -66,6 +68,8 @@ RESULT / ACTION_RESULT / TARGET_STATE 的 `status`：
 | 6 | NOTHING_TO_UNDO | 没有可撤销的片段。 |
 
 STATUS `code`：0 清除，1 缺少语音识别权限，2 缺少辅助功能权限，3 Orca CLI 不可用，4 `zh-CN` 识别器不可用。
+
+NOTES_STATE `notice`：0 无，1 已开始，2 已停止，3 Voice Notes 未能及时启动，4 开始失败，5 已开始但使用蓝牙麦克风（风险 `bluetooth_mic`），6 已开始但有其他风险，7 未安装 Voice Notes，8 已开始但开启了语音突显（风险 `voice_isolation`），9 Voice Notes 中未允许控制（“允许 AI 控制录制”关闭），10 停止失败。
 
 ## 音频
 
@@ -92,3 +96,6 @@ STATUS `code`：0 清除，1 缺少语音识别权限，2 缺少辅助功能权�
 - 配套程序以无响应写发送 PARTIAL，其余帧均以有响应写发送。
 - （重新）连接时设备发送 HELLO，配套程序回复 HELLO_ACK 和 TARGET_STATE。目标保存在配套程序的 `~/.config/vibe-voice/target.json` 中，设备和配套程序重启后仍然有效。
 - 听写过程中断开连接时，双方都放弃本次听写且不插入。
+- **Voice Notes 录音。** Mac 应用 Voice Notes（`com.teemo.voice-notes`）中的会议录音，由 Mac 的麦克风采集。它与听写互不影响：听写中也接受 NOTES_TOGGLE 且绝不结束听写；Voice Notes 也绝不改变目标、撤销或任何听写帧。配套程序通过 Voice Notes 的 Unix socket `<app data>/mcp.sock`（`{"op":"status"|"start"|"stop"}`）通信，且总在独立的工作线程上进行，因此 Voice Notes 启动或加载模型时音频和 PARTIAL 帧照常流动。
+- 收到 NOTES_TOGGLE 后，配套程序立即回复 NOTES_STATE 启动中（3）或停止中（4），随后回复带结果和 notice 的 NOTES_STATE。开始录音时如 Voice Notes 未运行，则在后台启动它（`open -g -b`，最多等 20 秒直到 socket 应答）；开录风险不会阻止录音，而以 notice 5、6 或 8 告知。启动中或停止中再次切换只会重发当前 NOTES_STATE。
+- NOTES_STATE 在 HELLO_ACK 之后（TARGET_STATE 和 STATUS 之后）、每次切换之后发送；配套程序每 2 秒（连接期间，听写中也是）查询一次状态，状态变化或设备计时偏差超过 2 秒时也会发送，因此在 Mac 上开始、暂停或停止的录音也会显示。断开连接后设备清除该状态。

@@ -19,6 +19,11 @@ use crate::protocol::{
     APP_NONE, Action, CompanionFrame, DeviceFrame, FLAG_CURRENT, FLAG_NOT_RUNNING, FLAG_SUBLIST,
     LIST_ORCA, LIST_ROOT, PROTOCOL_VERSION, Status, StatusCode, TargetKind, utf8_head,
 };
+use crate::protocol::{NotesNotice, NotesState};
+use crate::voice_notes::{
+    NotesError, NotesOp, NotesPhase, NotesReply, NotesStatus, RISK_BLUETOOTH_MIC,
+    RISK_VOICE_ISOLATION,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
@@ -257,6 +262,70 @@ pub fn compose_label(name: &str, title: Option<&str>, max_bytes: usize) -> Strin
     format!("{name}{SEP}{title}")
 }
 
+/// The Voice Notes Recording as last known, plus the ops queued for the
+/// worker thread. Independent of Dictation, Target and Undo.
+#[derive(Debug)]
+struct Notes {
+    state: NotesState,
+    /// Recording time as of `at` (it advances only while recording).
+    elapsed_ms: u64,
+    at: Instant,
+    action_pending: bool,
+    poll_pending: bool,
+    /// Last NOTES_STATE sent: state, elapsed seconds, when.
+    sent: Option<(NotesState, u32, Instant)>,
+    ops: Vec<NotesOp>,
+}
+
+impl Notes {
+    fn new() -> Self {
+        Self {
+            state: NotesState::Idle,
+            elapsed_ms: 0,
+            at: Instant::now(),
+            action_pending: false,
+            poll_pending: false,
+            sent: None,
+            ops: Vec::new(),
+        }
+    }
+
+    fn elapsed_s(&self, now: Instant) -> u32 {
+        let mut ms = self.elapsed_ms;
+        if self.state == NotesState::Recording {
+            ms += now.saturating_duration_since(self.at).as_millis() as u64;
+        }
+        (ms / 1000).min(u64::from(u32::MAX)) as u32
+    }
+
+    fn set(&mut self, state: NotesState, elapsed_ms: u64, now: Instant) {
+        self.state = state;
+        self.elapsed_ms = elapsed_ms;
+        self.at = now;
+    }
+}
+
+/// How far the Device's own count may drift before NOTES_STATE is resent.
+pub const NOTES_DRIFT_S: u32 = 2;
+
+fn start_notice(risks: &[String]) -> NotesNotice {
+    match risks.first().map(String::as_str) {
+        None => NotesNotice::Started,
+        Some(RISK_VOICE_ISOLATION) => NotesNotice::RiskVoiceIsolation,
+        Some(RISK_BLUETOOTH_MIC) => NotesNotice::RiskBluetooth,
+        Some(_) => NotesNotice::RiskOther,
+    }
+}
+
+fn start_error_notice(e: &NotesError) -> NotesNotice {
+    match e {
+        NotesError::NotInstalled => NotesNotice::NotInstalled,
+        NotesError::LaunchFailed | NotesError::NotRunning => NotesNotice::LaunchFailed,
+        NotesError::ControlDisabled => NotesNotice::ControlDisabled,
+        NotesError::Failed(_) => NotesNotice::StartFailed,
+    }
+}
+
 pub struct Companion<I: Injector, R: Recognizer, O: OrcaApi> {
     pub injector: I,
     pub recognizer: R,
@@ -276,6 +345,7 @@ pub struct Companion<I: Injector, R: Recognizer, O: OrcaApi> {
     orca_failed: bool,
     last_status: Option<StatusCode>,
     outbox: Vec<CompanionFrame>,
+    notes: Notes,
 }
 
 impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
@@ -301,6 +371,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             orca_failed: false,
             last_status: None,
             outbox: Vec::new(),
+            notes: Notes::new(),
         }
     }
 
@@ -356,6 +427,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             DeviceFrame::Undo => self.on_undo(now),
             DeviceFrame::TargetsReq { list } => self.on_targets_req(list, now),
             DeviceFrame::TargetSelect { list, index } => self.on_target_select(list, index, now),
+            DeviceFrame::NotesToggle => self.on_notes_toggle(now),
         }
     }
 
@@ -376,6 +448,9 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         self.send_state(r.view);
         self.last_status = None;
         self.report_health();
+        self.notes.sent = None;
+        self.send_notes(NotesNotice::None, now);
+        self.notes_poll();
     }
 
     fn on_dict_start(&mut self, dict: u8, now: Instant) {
@@ -1169,6 +1244,157 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
     }
 }
 
+// ----- Voice Notes Recording ---------------------------------------------
+//
+// Voice Notes calls run on a worker thread (`voice_notes::NotesWorker`); this
+// only queues ops and handles replies, so Dictation, Target and Undo are never
+// touched and never wait for Voice Notes.
+
+impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
+    /// Ops for the Voice Notes worker, in order.
+    pub fn take_notes_ops(&mut self) -> Vec<NotesOp> {
+        std::mem::take(&mut self.notes.ops)
+    }
+
+    pub fn notes_state(&self) -> NotesState {
+        self.notes.state
+    }
+
+    /// Ask for the Voice Notes status (every 2 s while linked) unless a
+    /// request is already outstanding.
+    pub fn notes_poll(&mut self) {
+        if !self.notes.poll_pending && !self.notes.action_pending {
+            self.notes.poll_pending = true;
+            self.notes.ops.push(NotesOp::Status);
+        }
+    }
+
+    fn send_notes(&mut self, notice: NotesNotice, now: Instant) {
+        if self.view.is_none() {
+            return; // not past HELLO
+        }
+        let elapsed_s = self.notes.elapsed_s(now);
+        let state = self.notes.state;
+        self.notes.sent = Some((state, elapsed_s, now));
+        self.send(CompanionFrame::NotesState {
+            state,
+            elapsed_s,
+            notice,
+        });
+    }
+
+    /// Resend NOTES_STATE when the state changed or the Device's count drifted.
+    fn notes_changed(&mut self, now: Instant) {
+        let due = match self.notes.sent {
+            None => true,
+            Some((state, s, at)) => {
+                let predicted = if state == NotesState::Recording {
+                    s.saturating_add(now.saturating_duration_since(at).as_secs() as u32)
+                } else {
+                    s
+                };
+                state != self.notes.state
+                    || predicted.abs_diff(self.notes.elapsed_s(now)) > NOTES_DRIFT_S
+            }
+        };
+        if due {
+            self.send_notes(NotesNotice::None, now);
+        }
+    }
+
+    /// NOTES_TOGGLE: start when idle, stop when recording or paused.
+    fn on_notes_toggle(&mut self, now: Instant) {
+        if self.notes.action_pending {
+            self.send_notes(NotesNotice::None, now);
+            return;
+        }
+        let (next, op) = match self.notes.state {
+            NotesState::Idle => (NotesState::Starting, NotesOp::Start),
+            NotesState::Recording | NotesState::Paused => (NotesState::Stopping, NotesOp::Stop),
+            NotesState::Starting | NotesState::Stopping => {
+                self.send_notes(NotesNotice::None, now);
+                return;
+            }
+        };
+        log::info!("Voice Notes: {op:?}");
+        let elapsed = self.notes.elapsed_s(now) as u64 * 1000;
+        self.notes.set(next, elapsed, now);
+        self.notes.action_pending = true;
+        self.notes.ops.push(op);
+        self.send_notes(NotesNotice::None, now);
+    }
+
+    fn apply_notes_status(&mut self, st: NotesStatus, now: Instant) {
+        let state = match st.phase {
+            NotesPhase::Idle => NotesState::Idle,
+            NotesPhase::Recording => NotesState::Recording,
+            NotesPhase::Paused => NotesState::Paused,
+        };
+        self.notes.set(state, st.elapsed_ms, now);
+    }
+
+    /// A reply from the Voice Notes worker.
+    pub fn handle_notes(&mut self, reply: NotesReply, now: Instant) {
+        match reply {
+            NotesReply::Status(r) => {
+                self.notes.poll_pending = false;
+                if self.notes.action_pending {
+                    return; // stale: a start or stop is in flight
+                }
+                match r {
+                    Ok(st) => self.apply_notes_status(st, now),
+                    Err(NotesError::NotRunning) => self.notes.set(NotesState::Idle, 0, now),
+                    Err(e) => {
+                        log::debug!("Voice Notes status: {e}");
+                        return;
+                    }
+                }
+                self.notes_changed(now);
+            }
+            NotesReply::Started(r) => {
+                self.notes.action_pending = false;
+                let notice = match r {
+                    Ok(risks) => {
+                        if !risks.is_empty() {
+                            log::warn!("Voice Notes recording with risks {risks:?}");
+                        }
+                        self.notes.set(NotesState::Recording, 0, now);
+                        start_notice(&risks)
+                    }
+                    Err(e) => {
+                        log::warn!("Voice Notes start: {e}");
+                        self.notes.set(NotesState::Idle, 0, now);
+                        start_error_notice(&e)
+                    }
+                };
+                self.send_notes(notice, now);
+                self.notes_poll();
+            }
+            NotesReply::Stopped(r) => {
+                self.notes.action_pending = false;
+                let notice = match r {
+                    Ok(()) => {
+                        self.notes.set(NotesState::Idle, 0, now);
+                        NotesNotice::Stopped
+                    }
+                    Err(e) => {
+                        log::warn!("Voice Notes stop: {e}");
+                        let ms = self.notes.elapsed_ms;
+                        self.notes.set(NotesState::Recording, ms, now);
+                        if e == NotesError::ControlDisabled {
+                            NotesNotice::ControlDisabled
+                        } else {
+                            NotesNotice::StopFailed
+                        }
+                    }
+                };
+                self.send_notes(notice, now);
+                self.notes_poll();
+            }
+        }
+    }
+}
+
 fn inject_status(r: Result<(), InjectError>) -> Status {
     match r {
         Ok(()) => Status::Ok,
@@ -1832,6 +2058,11 @@ mod tests {
                 CompanionFrame::Status {
                     code: StatusCode::Clear,
                     text: String::new()
+                },
+                CompanionFrame::NotesState {
+                    state: NotesState::Idle,
+                    elapsed_s: 0,
+                    notice: NotesNotice::None
                 }
             ]
         );
@@ -2479,5 +2710,226 @@ mod tests {
         );
         let long_name = compose_label(&"名".repeat(40), Some("t"), 71);
         assert!(long_name.starts_with(&"名".repeat(15)) && long_name.len() <= 71);
+    }
+
+    // ----- Voice Notes Recording -----------------------------------------
+
+    fn notes(state: NotesState, elapsed_s: u32, notice: NotesNotice) -> CompanionFrame {
+        CompanionFrame::NotesState {
+            state,
+            elapsed_s,
+            notice,
+        }
+    }
+
+    fn notes_frames(out: &[CompanionFrame]) -> Vec<CompanionFrame> {
+        out.iter()
+            .filter(|f| matches!(f, CompanionFrame::NotesState { .. }))
+            .cloned()
+            .collect()
+    }
+
+    fn rec(elapsed_ms: u64) -> NotesReply {
+        NotesReply::Status(Ok(NotesStatus {
+            phase: NotesPhase::Recording,
+            elapsed_ms,
+        }))
+    }
+
+    #[test]
+    fn hello_reports_notes_and_polls() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        let out = hello(&mut c, t0);
+        assert_eq!(
+            out.last().unwrap(),
+            &notes(NotesState::Idle, 0, NotesNotice::None)
+        );
+        assert_eq!(c.take_notes_ops(), [NotesOp::Status]);
+        // A poll is not repeated while one is outstanding.
+        c.notes_poll();
+        assert!(c.take_notes_ops().is_empty());
+        // Started from the Mac: the Device learns it from the poll.
+        c.handle_notes(rec(65_000), t0);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Recording, 65, NotesNotice::None)]
+        );
+        // The Device counts on its own; small drift stays quiet.
+        c.notes_poll();
+        c.handle_notes(rec(67_000), t0 + Duration::from_secs(2));
+        assert!(c.take_outbox().is_empty());
+        // Paused on the Mac.
+        c.notes_poll();
+        c.handle_notes(
+            NotesReply::Status(Ok(NotesStatus {
+                phase: NotesPhase::Paused,
+                elapsed_ms: 68_000,
+            })),
+            t0 + Duration::from_secs(4),
+        );
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Paused, 68, NotesNotice::None)]
+        );
+        // Voice Notes quit: idle.
+        c.notes_poll();
+        c.handle_notes(NotesReply::Status(Err(NotesError::NotRunning)), t0);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Idle, 0, NotesNotice::None)]
+        );
+    }
+
+    #[test]
+    fn notes_toggle_start_and_stop() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.take_notes_ops();
+        c.handle_notes(NotesReply::Status(Err(NotesError::NotRunning)), t0);
+        c.take_outbox();
+        c.handle_frame(DeviceFrame::NotesToggle, t0);
+        assert_eq!(c.take_notes_ops(), [NotesOp::Start]);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Starting, 0, NotesNotice::None)]
+        );
+        // A second press while starting does nothing new; polls wait.
+        c.handle_frame(DeviceFrame::NotesToggle, t0);
+        c.notes_poll();
+        assert!(c.take_notes_ops().is_empty());
+        c.take_outbox();
+        c.handle_notes(NotesReply::Started(Ok(vec![RISK_BLUETOOTH_MIC.into()])), t0);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Recording, 0, NotesNotice::RiskBluetooth)]
+        );
+        assert_eq!(c.take_notes_ops(), [NotesOp::Status]);
+        c.handle_notes(rec(3_000), t0 + Duration::from_secs(3));
+        c.handle_frame(DeviceFrame::NotesToggle, t0 + Duration::from_secs(3));
+        assert_eq!(c.take_notes_ops(), [NotesOp::Stop]);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Stopping, 3, NotesNotice::None)]
+        );
+        c.handle_notes(NotesReply::Stopped(Ok(())), t0 + Duration::from_secs(4));
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Idle, 0, NotesNotice::Stopped)]
+        );
+    }
+
+    #[test]
+    fn notes_notices() {
+        assert_eq!(start_notice(&[]), NotesNotice::Started);
+        assert_eq!(
+            start_notice(&[RISK_VOICE_ISOLATION.into(), RISK_BLUETOOTH_MIC.into()]),
+            NotesNotice::RiskVoiceIsolation
+        );
+        assert_eq!(start_notice(&["new_kind".into()]), NotesNotice::RiskOther);
+        for (e, n) in [
+            (NotesError::NotInstalled, NotesNotice::NotInstalled),
+            (NotesError::LaunchFailed, NotesNotice::LaunchFailed),
+            (NotesError::ControlDisabled, NotesNotice::ControlDisabled),
+            (NotesError::Failed("x".into()), NotesNotice::StartFailed),
+        ] {
+            let mut c = companion();
+            let t0 = Instant::now();
+            hello(&mut c, t0);
+            c.handle_frame(DeviceFrame::NotesToggle, t0);
+            c.take_outbox();
+            c.handle_notes(NotesReply::Started(Err(e)), t0);
+            assert_eq!(c.take_outbox(), [notes(NotesState::Idle, 0, n)]);
+        }
+        // A failed stop keeps the recording.
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.take_notes_ops();
+        c.handle_notes(rec(10_000), t0);
+        c.handle_frame(DeviceFrame::NotesToggle, t0);
+        c.take_outbox();
+        c.handle_notes(NotesReply::Stopped(Err(NotesError::Failed("x".into()))), t0);
+        assert_eq!(
+            c.take_outbox(),
+            [notes(NotesState::Recording, 10, NotesNotice::StopFailed)]
+        );
+    }
+
+    #[test]
+    fn notes_and_dictation_run_side_by_side() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.take_notes_ops();
+        dictate(&mut c, 1, "第一句", t0);
+        // Toggle during a Dictation: it neither stops nor cancels it.
+        c.handle_frame(DeviceFrame::DictStart { dict: 2 }, t0);
+        partial(&mut c, 2, "继续", t0);
+        c.take_outbox();
+        c.handle_frame(DeviceFrame::NotesToggle, t0);
+        assert!(c.dictation_active());
+        assert_eq!(c.take_notes_ops(), [NotesOp::Start]);
+        // Audio keeps flowing while Voice Notes starts (on its own thread).
+        c.handle_frame(audio(2, 0), t0);
+        c.handle_frame(audio(2, 1), t0);
+        assert_eq!(c.recognizer.samples, 320 * 3);
+        c.handle_notes(NotesReply::Started(Ok(vec![])), t0);
+        assert!(c.dictation_active());
+        let out = c.take_outbox();
+        assert_eq!(
+            notes_frames(&out),
+            [
+                notes(NotesState::Starting, 0, NotesNotice::None),
+                notes(NotesState::Recording, 0, NotesNotice::Started)
+            ]
+        );
+        assert!(!out.iter().any(|f| matches!(
+            f,
+            CompanionFrame::TargetState { .. } | CompanionFrame::Result { .. }
+        )));
+        // The Dictation finishes normally and its Segment is undoable.
+        c.handle_frame(DeviceFrame::DictStop { dict: 2 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 2,
+                text: "继续写".into(),
+            },
+            t0,
+        );
+        // Voice Notes stops while the Segment is pending Undo.
+        c.handle_frame(DeviceFrame::NotesToggle, t0);
+        c.handle_notes(NotesReply::Stopped(Ok(())), t0);
+        c.handle_frame(DeviceFrame::Undo, t0);
+        assert_eq!(
+            c.injector.log,
+            [
+                format!("insert {WECHAT} 第一句"),
+                format!("insert {WECHAT} 继续写"),
+                format!("delete {WECHAT} 3")
+            ]
+        );
+        assert_eq!(
+            c.target(),
+            Some(&StoredTarget::App {
+                bundle_id: WECHAT.into()
+            })
+        );
+        // Polls are independent of the Dictation-time refresh pause.
+        c.handle_frame(DeviceFrame::DictStart { dict: 3 }, t0);
+        c.take_notes_ops();
+        c.handle_notes(NotesReply::Status(Err(NotesError::NotRunning)), t0);
+        assert!(c.dictation_active());
+        c.notes_poll();
+        assert_eq!(c.take_notes_ops(), [NotesOp::Status]);
+    }
+
+    #[test]
+    fn notes_state_waits_for_hello() {
+        let mut c = companion();
+        c.handle_frame(DeviceFrame::NotesToggle, Instant::now());
+        assert!(c.take_outbox().is_empty());
+        assert_eq!(c.take_notes_ops(), [NotesOp::Start]);
     }
 }

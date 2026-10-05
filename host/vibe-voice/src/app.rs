@@ -13,11 +13,13 @@ use vibe_voice::orca::{OrcaApi, OrcaClient, OrcaError, OrcaSnapshot, ProcessRunn
 use vibe_voice::protocol::{AudioFrame, CompanionFrame, DeviceFrame, SAMPLES_PER_FRAME};
 use vibe_voice::session::{Companion, InjectError, Injector, RecogEvent};
 use vibe_voice::speech::{self, AppleRecognizer};
+use vibe_voice::voice_notes::{NotesReply, NotesWorker, VoiceNotesClient};
 use vibe_voice::{adpcm, ui};
 
 enum CoreEvent {
     Link(LinkEvent),
     Recog(RecogEvent),
+    Notes(NotesReply),
 }
 
 fn init_logging(verbose: bool) {
@@ -61,12 +63,14 @@ pub fn main() {
             std::process::exit(simulate(Path::new(file)));
         }
         Some("--orca-list") => orca_list(),
+        Some("--notes-status") => notes_status(),
         Some("--check") => check(),
         Some("-h" | "--help") => {
             println!(
                 "vibe-voice [--verbose]            run the Companion\n\
                  vibe-voice --simulate <file>      recognize a 16 kHz mono 16-bit WAV/PCM file (no BLE, no insert)\n\
                  vibe-voice --orca-list            list Orca Sessions, Current Conversation first (read-only)\n\
+                 vibe-voice --notes-status         Voice Notes recording status (read-only)\n\
                  vibe-voice --check                show permission status"
             );
         }
@@ -145,10 +149,16 @@ fn core_loop(
     self_tx: mpsc::Sender<CoreEvent>,
     out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) {
+    let notes_tx = self_tx.clone();
     let recognizer = AppleRecognizer::new(Arc::new(move |e| {
         let _ = self_tx.send(CoreEvent::Recog(e));
     }));
     let orca = OrcaClient::new(ProcessRunner::locate());
+    // Voice Notes calls can block for seconds (launch, model load, finalize):
+    // they run on their own thread so Dictation audio keeps flowing.
+    let notes = NotesWorker::spawn(VoiceNotesClient::system(), move |r| {
+        let _ = notes_tx.send(CoreEvent::Notes(r));
+    });
     let store = config::target_path();
     let target = config::StoredTarget::load(&store);
     log::info!("stored Target: {target:?}");
@@ -193,11 +203,16 @@ fn core_loop(
                 Err(e) => log::warn!("bad frame from Device: {e}"),
             },
             Some(CoreEvent::Recog(e)) => c.handle_recog(e, now),
+            Some(CoreEvent::Notes(r)) => c.handle_notes(r, now),
             None => {}
         }
         if connected && now >= next_health {
             next_health = now + HEALTH_INTERVAL;
             c.refresh(now);
+            c.notes_poll();
+        }
+        for op in c.take_notes_ops() {
+            notes.send(op);
         }
         deadline = c.poll(Instant::now());
         for f in c.take_outbox() {
@@ -252,6 +267,19 @@ fn orca_list() {
             }
             println!("{} Orca Sessions", snap.sessions.len());
         }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Read-only: `{"op":"status"}` on the Voice Notes socket.
+fn notes_status() {
+    use vibe_voice::voice_notes::{VoiceNotesApi, socket_path};
+    println!("socket: {}", socket_path().display());
+    match VoiceNotesClient::system().status() {
+        Ok(s) => println!("Voice Notes: {:?}, {} ms", s.phase, s.elapsed_ms),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);

@@ -39,7 +39,9 @@ size_t vv_proto_audio(vv_frame_t *f, uint8_t dict, uint16_t seq, int16_t pred,
 }
 
 size_t vv_proto_simple(vv_frame_t *f, uint8_t type) {
-    if (type != VV_MSG_SUBMIT && type != VV_MSG_UNDO) return f->len = 0;
+    if (type != VV_MSG_SUBMIT && type != VV_MSG_UNDO && type != VV_MSG_NOTES_TOGGLE) {
+        return f->len = 0;
+    }
     f->data[0] = type;
     return f->len = 1;
 }
@@ -97,6 +99,13 @@ bool vv_proto_decode(const uint8_t *data, size_t len, vv_msg_t *msg) {
         msg->c = data[3];
         msg->d = data[4];
         return with_text(data, len, 5, msg);
+    case VV_MSG_NOTES_STATE:
+        if (len < 7) return false;
+        msg->a = data[1];
+        msg->u32 = (uint32_t)data[2] | ((uint32_t)data[3] << 8) | ((uint32_t)data[4] << 16) |
+                   ((uint32_t)data[5] << 24);
+        msg->c = data[6];
+        return true;
     case VV_MSG_TARGET_STATE:
         if (len < 4) return false;
         msg->a = data[1];

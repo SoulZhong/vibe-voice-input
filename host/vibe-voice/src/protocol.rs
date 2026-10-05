@@ -30,6 +30,7 @@ pub mod ty {
     pub const UNDO: u8 = 0x21;
     pub const TARGETS_REQ: u8 = 0x30;
     pub const TARGET_SELECT: u8 = 0x31;
+    pub const NOTES_TOGGLE: u8 = 0x40;
 
     pub const HELLO_ACK: u8 = 0x81;
     pub const STATUS: u8 = 0x82;
@@ -39,6 +40,7 @@ pub mod ty {
     pub const TARGET_ITEM: u8 = 0xB0;
     pub const TARGET_END: u8 = 0xB1;
     pub const TARGET_STATE: u8 = 0xB2;
+    pub const NOTES_STATE: u8 = 0xC0;
 }
 
 /// RESULT / ACTION_RESULT / TARGET_STATE status.
@@ -93,6 +95,36 @@ pub const FLAG_SUBLIST: u8 = 0x02;
 /// The app is not running.
 pub const FLAG_NOT_RUNNING: u8 = 0x04;
 
+/// NOTES_STATE `state`: the Voice Notes Recording as the Device shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NotesState {
+    Idle = 0,
+    Recording = 1,
+    Paused = 2,
+    /// Start requested (Voice Notes may be launching or loading its model).
+    Starting = 3,
+    /// Stop requested (Voice Notes is finishing the note).
+    Stopping = 4,
+}
+
+/// NOTES_STATE `notice`: a one-off event for a toast on the Device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NotesNotice {
+    None = 0,
+    Started = 1,
+    Stopped = 2,
+    LaunchFailed = 3,
+    StartFailed = 4,
+    RiskBluetooth = 5,
+    RiskOther = 6,
+    NotInstalled = 7,
+    RiskVoiceIsolation = 8,
+    ControlDisabled = 9,
+    StopFailed = 10,
+}
+
 /// ACTION_RESULT action codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -114,15 +146,31 @@ pub struct AudioFrame {
 /// A frame sent by the Device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceFrame {
-    Hello { ver: u8, fw: String },
-    DictStart { dict: u8 },
+    Hello {
+        ver: u8,
+        fw: String,
+    },
+    DictStart {
+        dict: u8,
+    },
     Audio(AudioFrame),
-    DictStop { dict: u8 },
-    DictCancel { dict: u8 },
+    DictStop {
+        dict: u8,
+    },
+    DictCancel {
+        dict: u8,
+    },
     Submit,
     Undo,
-    TargetsReq { list: u8 },
-    TargetSelect { list: u8, index: u8 },
+    TargetsReq {
+        list: u8,
+    },
+    TargetSelect {
+        list: u8,
+        index: u8,
+    },
+    /// Start or stop a Voice Notes Recording.
+    NotesToggle,
 }
 
 /// A frame sent by the Companion.
@@ -166,6 +214,12 @@ pub enum CompanionFrame {
         /// [`APP_NONE`].
         app: u8,
         label: String,
+    },
+    NotesState {
+        state: NotesState,
+        /// Recording time so far (paused time excluded).
+        elapsed_s: u32,
+        notice: NotesNotice,
     },
 }
 
@@ -283,6 +337,7 @@ impl DeviceFrame {
                     index: bytes[2],
                 }
             }
+            ty::NOTES_TOGGLE => DeviceFrame::NotesToggle,
             other => return Err(DecodeError::UnknownType(other)),
         })
     }
@@ -312,6 +367,7 @@ impl DeviceFrame {
             DeviceFrame::Undo => vec![ty::UNDO],
             DeviceFrame::TargetsReq { list } => vec![ty::TARGETS_REQ, *list],
             DeviceFrame::TargetSelect { list, index } => vec![ty::TARGET_SELECT, *list, *index],
+            DeviceFrame::NotesToggle => vec![ty::NOTES_TOGGLE],
         }
     }
 }
@@ -365,6 +421,16 @@ impl CompanionFrame {
                 vec![ty::TARGET_STATE, *status as u8, *kind as u8, *app],
                 label,
             ),
+            CompanionFrame::NotesState {
+                state,
+                elapsed_s,
+                notice,
+            } => {
+                let mut v = vec![ty::NOTES_STATE, *state as u8];
+                v.extend_from_slice(&elapsed_s.to_le_bytes());
+                v.push(*notice as u8);
+                v
+            }
         }
     }
 
@@ -480,6 +546,40 @@ impl CompanionFrame {
                     kind,
                     app: bytes[3],
                     label: text(4)?,
+                }
+            }
+            ty::NOTES_STATE => {
+                need(bytes, 7)?;
+                let bad = DecodeError::Truncated {
+                    ty: t,
+                    len: bytes.len(),
+                };
+                let state = match bytes[1] {
+                    0 => NotesState::Idle,
+                    1 => NotesState::Recording,
+                    2 => NotesState::Paused,
+                    3 => NotesState::Starting,
+                    4 => NotesState::Stopping,
+                    _ => return Err(bad),
+                };
+                let notice = match bytes[6] {
+                    0 => NotesNotice::None,
+                    1 => NotesNotice::Started,
+                    2 => NotesNotice::Stopped,
+                    3 => NotesNotice::LaunchFailed,
+                    4 => NotesNotice::StartFailed,
+                    5 => NotesNotice::RiskBluetooth,
+                    6 => NotesNotice::RiskOther,
+                    7 => NotesNotice::NotInstalled,
+                    8 => NotesNotice::RiskVoiceIsolation,
+                    9 => NotesNotice::ControlDisabled,
+                    10 => NotesNotice::StopFailed,
+                    _ => return Err(bad),
+                };
+                CompanionFrame::NotesState {
+                    state,
+                    elapsed_s: u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+                    notice,
                 }
             }
             other => return Err(DecodeError::UnknownType(other)),
@@ -611,6 +711,24 @@ mod tests {
             .encode(),
             vec![0xB2, 3, 2, 0, b'o']
         );
+    }
+
+    #[test]
+    fn notes_frames_layout() {
+        assert_eq!(DeviceFrame::NotesToggle.encode(), vec![0x40]);
+        assert_eq!(
+            DeviceFrame::decode(&[0x40]).unwrap(),
+            DeviceFrame::NotesToggle
+        );
+        let f = CompanionFrame::NotesState {
+            state: NotesState::Recording,
+            elapsed_s: 0x0102_0304,
+            notice: NotesNotice::RiskBluetooth,
+        };
+        assert_eq!(f.encode(), vec![0xC0, 1, 4, 3, 2, 1, 5]);
+        assert_eq!(CompanionFrame::decode(&f.encode()).unwrap(), f);
+        assert!(CompanionFrame::decode(&[0xC0, 1, 0, 0, 0, 0]).is_err());
+        assert!(CompanionFrame::decode(&[0xC0, 9, 0, 0, 0, 0, 0]).is_err());
     }
 
     #[test]

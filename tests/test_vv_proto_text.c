@@ -70,6 +70,12 @@ static void test_decoder(void) {
            m.text_len == 1 && m.text[0] == 'W');
     assert(vv_proto_decode(state, 4, &m) && m.c == 2 && m.text_len == 0);
     assert(!vv_proto_decode(state, 3, &m));
+    // NOTES_STATE: state, elapsed u32 LE, notice.
+    const uint8_t notes[] = { 0xC0, 1, 0x04, 0x03, 0x02, 0x01, 5 };
+    assert(vv_proto_decode(notes, 7, &m) && m.a == 1 && m.u32 == 0x01020304u && m.c == 5);
+    assert(!vv_proto_decode(notes, 6, &m));
+    vv_frame_t tf;
+    assert(vv_proto_simple(&tf, VV_MSG_NOTES_TOGGLE) == 1 && tf.data[0] == 0x40);
     const uint8_t status[] = { 0x82, 2 };
     assert(vv_proto_decode(status, 2, &m) && m.a == 2 && m.text_len == 0);
 
@@ -149,6 +155,15 @@ static void test_format(void) {
     assert(strcmp(t, "05:00") == 0);
     vv_format_elapsed(200u * 60u * 1000u, t);
     assert(strcmp(t, "99:00") == 0);
+    char n[9];
+    vv_format_notes_elapsed(0, n);
+    assert(strcmp(n, "00:00") == 0);
+    vv_format_notes_elapsed(3599, n);
+    assert(strcmp(n, "59:59") == 0);
+    vv_format_notes_elapsed(3600, n);
+    assert(strcmp(n, "1:00:00") == 0);
+    vv_format_notes_elapsed(100u * 3600u, n);
+    assert(strcmp(n, "99:00:00") == 0);
     char p[8];
     vv_format_passkey(42, p);
     assert(strcmp(p, "000 042") == 0);

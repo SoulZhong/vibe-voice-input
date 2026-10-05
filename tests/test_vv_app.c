@@ -135,11 +135,14 @@ static void test_cancel_and_undo(void) {
     frame(nothing, sizeof(nothing));
     assert(app.toast == VV_TOAST_NOTHING_TO_UNDO);
 
-    // DOUBLE never Submits or Undoes.
+    // DOUBLE never Submits or Undoes; a double OK only toggles Voice Notes.
     press(VV_BTN_DOWN, VV_PRESS_DOUBLE);
     assert(act.frame_count == 0);
+    press(VV_BTN_UP, VV_PRESS_DOUBLE);
+    assert(act.frame_count == 0);
     press(VV_BTN_OK, VV_PRESS_DOUBLE);
-    assert(act.frame_count == 0 && app.state == VV_ST_IDLE);
+    assert(act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_NOTES_TOGGLE);
+    assert(act.flags == 0 && app.state == VV_ST_IDLE);
 
     // Undo after an Insert leaves the result preview.
     press(VV_BTN_OK, VV_PRESS_CLICK);
@@ -384,6 +387,99 @@ static void test_picker(void) {
     assert(app.state == VV_ST_NO_LINK && !app.picker_jumping);
 }
 
+static void notes_state(uint8_t state, uint32_t elapsed_s, uint8_t notice) {
+    const uint8_t data[] = { 0xC0, state, (uint8_t)elapsed_s, (uint8_t)(elapsed_s >> 8),
+                             (uint8_t)(elapsed_s >> 16), (uint8_t)(elapsed_s >> 24), notice };
+    frame(data, sizeof(data));
+}
+
+static bool toggled(void) {
+    return act.frame_count == 1 && act.frames[0].data[0] == VV_MSG_NOTES_TOGGLE &&
+           act.frames[0].len == 1 && act.flags == 0;
+}
+
+static void test_voice_notes(void) {
+    connect_ready();
+    // Not linked: a double press does nothing.
+    vv_app_t saved = app;
+    link_event(VV_LINK_DISCONNECTED, 0);
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(act.frame_count == 0);
+    app = saved;
+
+    // Idle: double OK toggles; the Companion answers with NOTES_STATE.
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(toggled() && app.state == VV_ST_IDLE);
+    notes_state(VV_NOTES_STARTING, 0, VV_NOTICE_NONE);
+    assert(vv_app_notes_active(&app) && (vv_app_take_dirty(&app) & VV_DIRTY_NOTES));
+    notes_state(VV_NOTES_RECORDING, 0, VV_NOTICE_RISK_BLUETOOTH);
+    assert(app.toast == VV_TOAST_NOTES_RISK_BLUETOOTH);
+    // Counted locally while recording.
+    tick(999);
+    assert(app.notes_elapsed_s == 0);
+    tick(1);
+    assert(app.notes_elapsed_s == 1 && (vv_app_take_dirty(&app) & VV_DIRTY_NOTES));
+
+    // Dictating: a double OK toggles Voice Notes and leaves the Dictation alone.
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.state == VV_ST_DICTATING);
+    uint8_t dict = app.dict;
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(toggled() && app.state == VV_ST_DICTATING && app.dict == dict && !app.dict_done);
+    notes_state(VV_NOTES_STOPPING, 61, VV_NOTICE_NONE);
+    tick(5000);
+    assert(app.state == VV_ST_DICTATING && app.notes_elapsed_s == 61);   // not counting
+    notes_state(VV_NOTES_IDLE, 0, VV_NOTICE_STOPPED);
+    assert(!vv_app_notes_active(&app) && app.toast == VV_TOAST_NOTES_STOPPED);
+    assert(app.state == VV_ST_DICTATING);
+    const uint8_t partial[] = { 0x90, dict, 'o', 'k' };
+    frame(partial, sizeof(partial));
+    assert(strcmp(app.partial, "ok") == 0);
+
+    // Waiting and Result: still toggles; the RESULT is unaffected.
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.state == VV_ST_WAITING);
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(toggled() && app.state == VV_ST_WAITING);
+    const uint8_t result[] = { 0x91, dict, 0, 'o', 'k' };
+    frame(result, sizeof(result));
+    assert(app.state == VV_ST_RESULT && app.result == VV_RESULT_INSERTED);
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(toggled() && app.state == VV_ST_RESULT);
+
+    // Picker: a double OK does nothing (UP/DOWN double still move two rows).
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    assert(app.state == VV_ST_PICKER);
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(act.frame_count == 0 && app.state == VV_ST_PICKER);
+    press(VV_BTN_OK, VV_PRESS_LONG);
+
+    // Notices map to toasts; unknown notices and states are safe.
+    static const struct { uint8_t notice; vv_toast_t toast; } cases[] = {
+        { VV_NOTICE_STARTED, VV_TOAST_NOTES_STARTED },
+        { VV_NOTICE_LAUNCH_FAILED, VV_TOAST_NOTES_LAUNCH_FAILED },
+        { VV_NOTICE_START_FAILED, VV_TOAST_NOTES_START_FAILED },
+        { VV_NOTICE_RISK_OTHER, VV_TOAST_NOTES_RISK_OTHER },
+        { VV_NOTICE_NOT_INSTALLED, VV_TOAST_NOTES_NOT_INSTALLED },
+        { VV_NOTICE_RISK_VOICE_ISOLATION, VV_TOAST_NOTES_RISK_VOICE_ISOLATION },
+        { VV_NOTICE_CONTROL_DISABLED, VV_TOAST_NOTES_CONTROL_DISABLED },
+        { VV_NOTICE_STOP_FAILED, VV_TOAST_NOTES_STOP_FAILED },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        notes_state(VV_NOTES_IDLE, 0, cases[i].notice);
+        assert(app.toast == cases[i].toast);
+    }
+    vv_toast_t before = app.toast;
+    notes_state(9, 7, 99);
+    assert(app.notes_state == VV_NOTES_IDLE && app.toast == before);
+
+    // Link loss forgets the recording state until the next HELLO.
+    notes_state(VV_NOTES_PAUSED, 3600, VV_NOTICE_NONE);
+    assert(vv_app_notes_active(&app));
+    link_event(VV_LINK_DISCONNECTED, 0);
+    assert(!vv_app_notes_active(&app));
+}
+
 static void test_target_logo_and_title(void) {
     vv_app_init(&app, "fw");
     assert(vv_app_target_logo(&app) == -1 && strcmp(vv_app_target_title(&app), "") == 0);
@@ -430,6 +526,7 @@ int main(void) {
     test_disconnect_abandons();
     test_picker();
     test_target_logo_and_title();
+    test_voice_notes();
     test_status_and_target();
     puts("test_vv_app: PASS");
     return 0;

@@ -31,6 +31,10 @@ One live Orca-managed terminal. Text is delivered directly to it without focus o
 Choosing a conversation in the Device picker: it becomes the Target and is brought to the front. The picker opens with the Current Conversation highlighted.
 _Avoid_: pin
 
+**Voice Notes Recording**:
+A meeting recording in the Mac app Voice Notes, captured by the Mac's microphone (not the Device's). Double-pressing OK starts one, or stops the one in progress; Voice Notes is launched if needed. It is not a Supported App and never receives Inserts.
+_Avoid_: dictation, note
+
 **Target Title**:
 The name shown on the Device for the Target's current conversation (for example a chat partner's name), so the user sees where text will land before Submitting.
 
@@ -65,7 +69,8 @@ Ending a Dictation without inserting anything.
 - **Undo** applies only to the latest **Segment** and only once.
 - An **Insert** never Submits; only the DOWN button Submits.
 - Mac focus on a Supported App and a **Jump** both set the **Target**; focus elsewhere leaves it unchanged.
-- Only Orca is ever launched automatically, as the default Target.
+- Only Orca is ever launched automatically, as the default Target (and Voice Notes, to start a Voice Notes Recording).
+- A **Voice Notes Recording** and a **Dictation** are independent: either can start, run or stop while the other is in progress.
 
 ## Example dialogue
 
