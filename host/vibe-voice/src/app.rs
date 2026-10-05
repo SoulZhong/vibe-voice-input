@@ -20,6 +20,7 @@ enum CoreEvent {
     Link(LinkEvent),
     Recog(RecogEvent),
     Notes(NotesReply),
+    OrcaWatch(Result<vibe_voice::orca::OrcaSnapshot, OrcaError>),
 }
 
 fn init_logging(verbose: bool) {
@@ -150,10 +151,36 @@ fn core_loop(
     out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) {
     let notes_tx = self_tx.clone();
+    let watch_tx = self_tx.clone();
     let recognizer = AppleRecognizer::new(Arc::new(move |e| {
         let _ = self_tx.send(CoreEvent::Recog(e));
     }));
     let orca = OrcaClient::new(ProcessRunner::locate());
+    // Orca watch: polls the terminal list every 2 s while linked, on its own
+    // thread (the CLI takes ~0.1 s), for Alerts and the Orca cache.
+    let linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let linked = linked.clone();
+        let tx = watch_tx;
+        std::thread::Builder::new()
+            .name("orca-watch".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                let mut client = OrcaClient::new(ProcessRunner::locate());
+                loop {
+                    std::thread::sleep(HEALTH_INTERVAL);
+                    if !linked.load(Ordering::Relaxed)
+                        || !inject_macos::app_running(vibe_voice::config::ORCA_BUNDLE_ID)
+                    {
+                        continue;
+                    }
+                    if tx.send(CoreEvent::OrcaWatch(client.snapshot())).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("orca-watch thread");
+    }
     // Voice Notes calls can block for seconds (launch, model load, finalize):
     // they run on their own thread so Dictation audio keeps flowing.
     let notes = NotesWorker::spawn(VoiceNotesClient::system(), move |r| {
@@ -188,9 +215,11 @@ fn core_loop(
             Some(CoreEvent::Link(LinkEvent::Connected(name))) => {
                 log::info!("Device {name} linked; waiting for HELLO");
                 connected = true;
+                linked.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Some(CoreEvent::Link(LinkEvent::Disconnected)) => {
                 connected = false;
+                linked.store(false, std::sync::atomic::Ordering::Relaxed);
                 c.on_disconnected();
             }
             Some(CoreEvent::Link(LinkEvent::Frame(bytes))) => match DeviceFrame::decode(&bytes) {
@@ -204,6 +233,7 @@ fn core_loop(
             },
             Some(CoreEvent::Recog(e)) => c.handle_recog(e, now),
             Some(CoreEvent::Notes(r)) => c.handle_notes(r, now),
+            Some(CoreEvent::OrcaWatch(r)) => c.handle_orca_watch(r, now),
             None => {}
         }
         if connected && now >= next_health {
@@ -260,6 +290,17 @@ fn orca_list() {
             for (i, s) in snap.sessions.iter().enumerate() {
                 let mark = if i == 0 && snap.has_current { '*' } else { ' ' };
                 println!("{mark}{i:2}  {}  [{}]", s.label(), s.handle);
+                if s.agent.is_some() {
+                    use vibe_voice::alerts::{DEFAULT_MESSAGE, preview_message, title_state};
+                    println!(
+                        "      {:?} {:?}: {}",
+                        s.agent.as_deref().unwrap_or(""),
+                        title_state(&s.raw_title),
+                        preview_message(&s.preview)
+                            .as_deref()
+                            .unwrap_or(DEFAULT_MESSAGE)
+                    );
+                }
             }
             match snap.current() {
                 Some(s) => println!("Current Conversation: {} [{}]", s.label(), s.handle),

@@ -71,6 +71,9 @@ static struct {
     lv_obj_t *picker, *picker_title, *picker_pos, *picker_msg;
     lv_obj_t *rows[PICKER_ROWS], *row_label[PICKER_ROWS], *row_tag[PICKER_ROWS];
     lv_obj_t *row_logo[PICKER_ROWS];
+    // Alert card (over the page) and the top-bar count badge
+    lv_obj_t *alert, *alert_logo, *alert_label, *alert_pos, *alert_msg;
+    lv_obj_t *badge, *badge_label;
     // Bottom
     lv_obj_t *hint1, *hint2, *toast, *toast_label;
 
@@ -237,6 +240,48 @@ static void build_picker(void) {
     }
 }
 
+static void build_alert(void) {
+    ui.alert = box(ui.scr, 16, 46, SCREEN_W - 32, 214, C_SURFACE, 14);
+    lv_obj_set_style_border_width(ui.alert, 1, 0);
+    lv_obj_set_style_border_color(ui.alert, lv_color_hex(C_AMBER), 0);
+    ui.alert_logo = image(ui.alert, 12, 12);
+    ui.alert_label = text(ui.alert, FONT_BODY, C_AMBER, 40, 11, 120, LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_height(ui.alert_label, 22);
+    lv_label_set_long_mode(ui.alert_label, LV_LABEL_LONG_MODE_DOTS);
+    ui.alert_pos = text(ui.alert, FONT_BODY, C_MUTED, 160, 11, 36, LV_TEXT_ALIGN_RIGHT);
+    ui.alert_msg = text(ui.alert, FONT_BODY, C_TEXT, 12, 46, SCREEN_W - 56, LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_height(ui.alert_msg, 7 * 21);
+    lv_label_set_long_mode(ui.alert_msg, LV_LABEL_LONG_MODE_DOTS);
+    show(ui.alert, false);
+
+    // Badge on the top-left logo's corner.
+    ui.badge = box(ui.scr, 30, 4, 16, 16, C_AMBER, LV_RADIUS_CIRCLE);
+    ui.badge_label = text(ui.badge, FONT_BODY, C_ON_MINT, 0, -3, 16, LV_TEXT_ALIGN_CENTER);
+    show(ui.badge, false);
+}
+
+static void render_alerts(const vv_app_t *app) {
+    bool card = vv_app_alert_card(app);
+    show(ui.alert, card);
+    if (card) {
+        const vv_alert_t *a = &app->alerts[app->alert_cursor];
+        bool logo = a->app < VV_APP_COUNT;
+        if (logo) lv_image_set_src(ui.alert_logo, vv_icons_20[a->app]);
+        show(ui.alert_logo, logo);
+        lv_label_set_text(ui.alert_label, a->label);
+        lv_label_set_text(ui.alert_msg, a->message);
+        if (app->alert_count > 1) {
+            lv_label_set_text_fmt(ui.alert_pos, "%u/%u", (unsigned)app->alert_cursor + 1,
+                                  (unsigned)app->alert_count);
+        } else {
+            lv_label_set_text(ui.alert_pos, "");
+        }
+    }
+    uint8_t badge = vv_app_alert_badge(app);
+    show(ui.badge, badge > 0);
+    if (badge) lv_label_set_text_fmt(ui.badge_label, "%u", (unsigned)badge);
+}
+
 static void build_bottom(void) {
     ui.hint1 = text(ui.scr, FONT_BODY, C_MUTED, 16, 266, SCREEN_W - 32, LV_TEXT_ALIGN_CENTER);
     ui.hint2 = text(ui.scr, FONT_BODY, C_MUTED, 16, 287, SCREEN_W - 32, LV_TEXT_ALIGN_CENTER);
@@ -262,8 +307,10 @@ void vv_ui_init(const char *device_name) {
     build_dictation();
     build_result();
     build_picker();
+    build_alert();
     build_bottom();
     build_top_bar();
+    lv_obj_move_foreground(ui.badge);
     vv_ui_set_battery(-1);
     lv_screen_load(ui.scr);
 }
@@ -528,7 +575,15 @@ static void render_bottom(const vv_app_t *app) {
     case VV_ST_NO_LINK:
     case VV_ST_PAIRING: h1 = ui.device_line; break;
     case VV_ST_IDLE:
-    case VV_ST_RESULT: h1 = VV_T_HINT_IDLE_1; h2 = VV_T_HINT_IDLE_2; break;
+    case VV_ST_RESULT:
+        if (vv_app_alert_card(app)) {
+            h1 = VV_T_ALERT_HINT;
+            h2 = app->alert_count > 1 ? VV_T_ALERT_NEXT : "";
+        } else {
+            h1 = VV_T_HINT_IDLE_1;
+            h2 = VV_T_HINT_IDLE_2;
+        }
+        break;
     case VV_ST_DICTATING: h2 = VV_T_HINT_DICT; break;
     case VV_ST_PICKER: h1 = VV_T_HINT_PICKER_1; h2 = VV_T_HINT_PICKER_2; break;
     default: break;
@@ -660,7 +715,8 @@ void vv_ui_render(const vv_app_t *app, uint32_t dirty) {
         if ((dirty & VV_DIRTY_ELAPSED) && app->state == VV_ST_DICTATING) render_elapsed(app);
         if ((dirty & VV_DIRTY_PICKER) && app->state == VV_ST_PICKER) render_picker(app);
     }
-    if (dirty & (VV_DIRTY_STATE | VV_DIRTY_TOAST)) render_bottom(app);
+    if (dirty & (VV_DIRTY_STATE | VV_DIRTY_ALERTS)) render_alerts(app);
+    if (dirty & (VV_DIRTY_STATE | VV_DIRTY_TOAST | VV_DIRTY_ALERTS)) render_bottom(app);
 }
 
 void vv_ui_set_battery(int soc) {

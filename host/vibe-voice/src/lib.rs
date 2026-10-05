@@ -5,6 +5,7 @@
 //! `inject_macos`, `ui`); `orca` keeps its process runner behind a trait.
 
 pub mod adpcm;
+pub mod alerts;
 pub mod audio;
 pub mod config;
 pub mod orca;

@@ -47,6 +47,8 @@ byte 1.. payload (type specific)
 | `0x30` | TARGETS_REQ | `list u8` | Ask for a picker list. `0` = the Supported Apps; `n` (1–4) = the conversations of root row `n - 1`: `1` Orca Sessions, `2` WeChat, `3` ChatGPT, `4` WeCom. |
 | `0x31` | TARGET_SELECT | `list u8`, `index u8` | Jump to a row of the last list sent. Reply TARGET_STATE. |
 | `0x40` | NOTES_TOGGLE | — | Start a Voice Notes Recording when none is active, else stop it (double OK). Reply NOTES_STATE. |
+| `0x50` | ALERT_OPEN | `id u8` | Open an Alert: Jump to its Orca Session. Reply TARGET_STATE. |
+| `0x51` | ALERT_DISMISS | `id u8` | Drop an Alert. No reply. |
 
 ### Companion → Device
 
@@ -61,6 +63,8 @@ byte 1.. payload (type specific)
 | `0xB1` | TARGET_END | `list u8`, `count u8` | List complete. |
 | `0xB2` | TARGET_STATE | `status u8`, `kind u8`, `app u8`, `label text` | The Target. `kind`: 1 a Supported App's Current Conversation, 2 an Orca Session (0 reserved). `app`: the Supported App it is in, `0` Orca, `1` WeChat, `2` ChatGPT, `3` WeCom, `0xFF` none; the Device shows that app's logo. `label` is `"<app> · <Target Title>"` when a title is known. |
 | `0xC0` | NOTES_STATE | `state u8`, `elapsed_s u32`, `notice u8` | The Voice Notes Recording (7 bytes). `state`: 0 idle, 1 recording, 2 paused, 3 starting, 4 stopping. `elapsed_s`: recording time so far (paused time excluded); the Device counts on from it while recording. `notice`: a one-off event for a toast, see below. |
+| `0xD0` | ALERT | `id u8`, `app u8`, `label_len u8`, `label text` (`label_len` bytes), `message text` (rest) | An Orca agent session waits for the user. `id` is stable per session; an ALERT with a known `id` replaces that Alert. `app` is the Supported App (0 Orca). `label` `"<worktree> · <title>"` (at most 63 bytes), `message` the agent's last words (at most 112 bytes, its tail with a leading `…` when cut). |
+| `0xD1` | ALERT_CLEAR | `id u8` | The session no longer waits (it works again, the user opened it on the Mac, or it closed): drop the Alert. |
 
 ### Status codes
 
@@ -156,6 +160,30 @@ in Voice Notes ("allow AI to control recording" off), 10 stop failed.
   `~/.config/vibe-voice/target.json`, so it survives Device and Companion
   restarts.
 - If the link drops during a Dictation, both sides abandon it without inserting.
+- **Alerts.** The Orca CLI has no event stream, so while linked the Companion
+  polls `orca terminal list` every 2 s on its own thread (the result also
+  refreshes its Orca cache) and reads each agent session's state from its title.
+  Claude Code: a spinner glyph prefix (`◐ ◑ ◒ ◓`, Braille `U+2800–U+28FF`, `✶ ✻ ✽ ✢`,
+  and similar) is working, `✳` is waiting. Other agents use the titles Orca
+  itself writes (its agent table): `"<Agent>"` working, `"<Agent> ready"` or
+  `"<Agent> - action required"` waiting, for Codex, Cursor Agent, OpenCode, Pi,
+  OMP, Droid, Hermes, Devin and ZCode; Gemini CLI is `✦` working, `◇` waiting.
+  Orca keeps Codex's own title while it works, so a Codex turn alerts only when
+  its title was recognizably working before. Other titles and terminals without
+  an agent are unknown and never alert.
+- An ALERT is raised on a working → waiting transition of a session with an
+  agent; never on first sight (Companion start or relink), for a session that
+  disappeared, or for the session the user is looking at (Orca frontmost and
+  that session its Current Conversation). One Alert per session; ALERT_CLEAR
+  follows when the session works again, is looked at, or closes. Pending Alerts
+  are resent after HELLO_ACK; on link loss both sides drop them. The message is
+  the readable end of the terminal preview (the agent's last lines before the
+  prompt box, with status, rule and prompt lines removed; Claude Code's recap
+  when present), or a fixed Chinese "waiting for your reply" text.
+- ALERT_OPEN Jumps like TARGET_SELECT on an Orca row: the session becomes the
+  Target, `orca terminal switch` and Orca are brought to the front, and
+  TARGET_STATE replies (with the failure status when the session is gone; an
+  unknown `id` is answered with ALERT_CLEAR and TARGET_STATE).
 - **Voice Notes Recording.** A meeting recording in the Mac app Voice Notes
   (`com.teemo.voice-notes`), captured by the Mac's microphone. It is
   independent of Dictation: NOTES_TOGGLE is accepted while dictating and never

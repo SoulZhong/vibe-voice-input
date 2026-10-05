@@ -480,6 +480,112 @@ static void test_voice_notes(void) {
     assert(!vv_app_notes_active(&app));
 }
 
+static void alert(uint8_t id, const char *label, const char *message) {
+    uint8_t data[VV_FRAME_MAX] = { 0xD0, id, VV_APP_ORCA, (uint8_t)strlen(label) };
+    size_t n = strlen(label), m = strlen(message);
+    memcpy(&data[4], label, n);
+    memcpy(&data[4 + n], message, m);
+    frame(data, 4 + n + m);
+}
+
+static bool sent_alert(uint8_t type, uint8_t id) {
+    return act.frame_count == 1 && act.frames[0].data[0] == type &&
+           act.frames[0].data[1] == id && act.frames[0].len == 2;
+}
+
+static void test_alerts(void) {
+    connect_ready();
+    assert(!vv_app_alert_card(&app) && vv_app_alert_badge(&app) == 0);
+    alert(1, "wt-a · fix", "Tests pass. Commit?");
+    assert(app.alert_count == 1 && vv_app_alert_card(&app));
+    assert(strcmp(app.alerts[0].label, "wt-a · fix") == 0);
+    assert(strcmp(app.alerts[0].message, "Tests pass. Commit?") == 0);
+    assert(vv_app_take_dirty(&app) & VV_DIRTY_ALERTS);
+    alert(2, "wt-b · docs", "Done");
+    alert(3, "wt-c · pr", "Merge?");
+    assert(app.alert_count == 3 && app.alert_cursor == 0);
+
+    // DOWN pages through; a replaced Alert moves to the end with new text.
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);
+    assert(app.alert_cursor == 1 && act.frame_count == 0);
+    alert(1, "wt-a · fix", "Still waiting");
+    assert(app.alert_count == 3 && app.alerts[2].id == 1 &&
+           strcmp(app.alerts[2].message, "Still waiting") == 0);
+    assert(app.alerts[app.alert_cursor].id == 2);   // still showing the same one
+
+    // UP dismisses, OK opens (and sends nothing else).
+    press(VV_BTN_UP, VV_PRESS_CLICK);
+    assert(sent_alert(VV_MSG_ALERT_DISMISS, 2) && app.alert_count == 2);
+    assert(app.state == VV_ST_IDLE && act.flags == 0);
+    press(VV_BTN_OK, VV_PRESS_CLICK);           // queue is [3, 1], card on 3
+    assert(sent_alert(VV_MSG_ALERT_OPEN, 3) && act.flags == 0);
+    assert(app.alert_count == 1 && app.alerts[0].id == 1 && app.state == VV_ST_IDLE);
+
+    // Double OK on the card toggles Voice Notes, never opens the Alert.
+    press(VV_BTN_OK, VV_PRESS_DOUBLE);
+    assert(toggled() && app.alert_count == 1);
+    // DOWN with one Alert does nothing; long OK still opens the picker.
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);
+    assert(act.frame_count == 0 && app.alert_count == 1);
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    assert(app.state == VV_ST_PICKER && !vv_app_alert_card(&app));
+    assert(vv_app_alert_badge(&app) == 1);
+    press(VV_BTN_OK, VV_PRESS_LONG);
+    assert(app.state == VV_ST_IDLE && vv_app_alert_card(&app));
+
+    // ALERT_CLEAR removes it; unknown ids are ignored.
+    uint8_t id = app.alerts[0].id;
+    const uint8_t stale[] = { 0xD1, 99 };
+    frame(stale, sizeof(stale));
+    assert(app.alert_count == 1);
+    const uint8_t clear[] = { 0xD1, id };
+    frame(clear, sizeof(clear));
+    assert(app.alert_count == 0 && !vv_app_alert_card(&app));
+    // With no Alert, Idle buttons are normal again.
+    press(VV_BTN_UP, VV_PRESS_CLICK);
+    assert(act.frames[0].data[0] == VV_MSG_UNDO);
+
+    // Dictating: no card, OK still stops the Dictation; a badge counts.
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.state == VV_ST_DICTATING);
+    alert(5, "wt · x", "y");
+    assert(!vv_app_alert_card(&app) && vv_app_alert_badge(&app) == 1);
+    press(VV_BTN_UP, VV_PRESS_CLICK);          // UP cancels the Dictation
+    assert(act.frames[0].data[0] == VV_MSG_DICT_CANCEL && app.alert_count == 1);
+    assert(app.state == VV_ST_RESULT && vv_app_alert_card(&app));
+    // Back in RESULT the card shows again and takes the click.
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(sent_alert(VV_MSG_ALERT_OPEN, 5) && app.state == VV_ST_IDLE);
+}
+
+static void test_alert_queue_cap_and_states(void) {
+    connect_ready();
+    for (uint8_t i = 1; i <= VV_ALERT_MAX + 2; i++) alert(i, "s", "m");
+    assert(app.alert_count == VV_ALERT_MAX && app.alerts[0].id == 3);
+    assert(app.alerts[VV_ALERT_MAX - 1].id == VV_ALERT_MAX + 2);
+    // Over-long and invalid text is cut and sanitized.
+    char big[VV_FRAME_MAX - 4 - 3 + 1];   // fills the frame
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    alert(50, "lbl", big);
+    assert(strlen(app.alerts[VV_ALERT_MAX - 1].message) < VV_ALERT_MSG_MAX);
+    const uint8_t bad[] = { 0xD0, 1, 0, 9, 'a' };   // label longer than the frame
+    vv_msg_t m;
+    assert(!vv_proto_decode(bad, sizeof(bad), &m));
+    // Dismiss them all, then: Waiting shows no card, only the badge.
+    while (app.alert_count) press(VV_BTN_UP, VV_PRESS_CLICK);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    press(VV_BTN_OK, VV_PRESS_CLICK);
+    assert(app.state == VV_ST_WAITING);
+    alert(60, "s", "m");
+    assert(!vv_app_alert_card(&app) && vv_app_alert_badge(&app) == 1);
+    press(VV_BTN_UP, VV_PRESS_CLICK);
+    assert(act.frame_count == 0 && app.alert_count == 1);
+    // Link loss clears the queue.
+    link_event(VV_LINK_DISCONNECTED, 0);
+    assert(app.alert_count == 0 && vv_app_alert_badge(&app) == 0);
+}
+
 static void test_target_logo_and_title(void) {
     vv_app_init(&app, "fw");
     assert(vv_app_target_logo(&app) == -1 && strcmp(vv_app_target_title(&app), "") == 0);
@@ -527,6 +633,8 @@ int main(void) {
     test_picker();
     test_target_logo_and_title();
     test_voice_notes();
+    test_alerts();
+    test_alert_queue_cap_and_states();
     test_status_and_target();
     puts("test_vv_app: PASS");
     return 0;

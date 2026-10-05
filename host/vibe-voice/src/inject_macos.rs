@@ -46,6 +46,11 @@ fn running_app(bundle_id: &str) -> Option<Retained<NSRunningApplication>> {
     apps.iter().find(|a| !a.isTerminated())
 }
 
+/// Whether an app with this bundle id is running (any thread).
+pub fn app_running(bundle_id: &str) -> bool {
+    running_app(bundle_id).is_some()
+}
+
 fn frontmost_app() -> Option<Retained<NSRunningApplication>> {
     NSWorkspace::sharedWorkspace().frontmostApplication()
 }

@@ -49,7 +49,9 @@ the time (`MM:SS`, or `VV_T_NOTES_REC_SHORT` with `H:MM:SS` from one hour), in
 amber `VV_T_NOTES_PAUSED` with the time when paused, `VV_T_NOTES_STARTING` or
 `VV_T_NOTES_STOPPING` while Voice Notes works; the Target logo stays beside it
 and Idle still shows the conversation. The time comes from NOTES_STATE and is
-counted on locally each second while recording. The bottom two lines show short
+counted on locally each second while recording. An amber badge with the number
+of queued Alerts sits on the logo's corner whenever the Alert card cannot show.
+The bottom two lines show short
 control hints, or a toast that temporarily replaces them.
 
 | State | Screen |
@@ -61,6 +63,7 @@ control hints, or a toast that temporarily replaces them.
 | Dictating | Coral dot + `VV_H_DICTATING`, elapsed `MM:SS` (turns amber in the last 30 s), a 16-bar live microphone meter, and the latest Partial Text wrapped over up to 6 lines, showing its tail with a leading `…` when it does not fit |
 | Waiting for result | Mint spinner, `VV_H_WAITING` ("recognizing…"), the last two lines of Partial Text |
 | Result (transient) | `VV_H_INSERTED` ("inserted") with a card previewing the Segment tail (6 s), or an error title and explanation (4 s) for EMPTY, CANCELLED, TARGET_UNAVAILABLE, RECOGNIZER_ERROR, PERMISSION, an unknown status, or a 30 s timeout. Then back to Idle. |
+| Alert card (Idle / Result with an Alert queued) | A card over the page with an amber outline: the app logo, the session label (`"<worktree> · <title>"`) in amber, `n/N` when several are queued, and the agent's message wrapped over up to 7 lines; hints `VV_T_ALERT_HINT` and, with several, `VV_T_ALERT_NEXT`. Not shown while dictating, waiting or in the picker; the badge counts instead |
 | Picker | `VV_H_PICKER_ROOT` (the four Supported Apps, each row starting with its 20 px logo) or the sub-list title (`VV_H_PICKER_ORCA`, `VV_H_PICKER_WECHAT`, `VV_H_PICKER_CHATGPT`, `VV_H_PICKER_WECOM`), position `n/N`, a 5-row window with the cursor highlighted in mint; tags: amber `VV_T_NOT_RUNNING` for not running, a dot for current (the Target's app, or the Current Conversation), an arrow for a row that opens a sub-list; messages for loading, jumping (`VV_T_PICKER_JUMPING`), and an empty list (`VV_T_PICKER_NOT_RUN` when the app is not running, else `VV_T_PICKER_NO_CONV`) |
 
 Toasts: submitting → submitted, undoing → undone, nothing to undo, Target not
@@ -88,6 +91,7 @@ slower than that window are two clicks.
 | State | UP | DOWN | OK click | OK long (500 ms) |
 | --- | --- | --- | --- | --- |
 | Idle / Result | Undo | Submit | Start Dictation; double: toggle Voice Notes | Open the Jump picker |
+| Alert card (Idle / Result) | Dismiss the Alert | Next Alert (if several) | Open the Alert (Jump to its session); double: toggle Voice Notes, the Alert stays | Open the Jump picker |
 | Dictating | Cancel | — | Stop (Companion Inserts); double: toggle Voice Notes, the Dictation continues | Stop (same as click) |
 | Waiting | — | — | Double: toggle Voice Notes | — |
 | Picker | Move up (wraps; double = 2) | Move down (wraps; double = 2) | Root row `i`: open list `i + 1` (that app's conversations); sub-list row: Jump | Back to the root list from a sub-list; close from the root list or while a Jump is pending |
@@ -117,6 +121,15 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   5 s (25 s for list 1, whose request may launch Orca) closes the picker with
   the list-failed toast; a Jump without a reply within 5 s closes it with the
   failed toast. A TARGET_STATE that is not a Jump reply only updates the top bar.
+- **Alerts.** ALERT frames queue up to 8 Alerts, oldest first; an ALERT with a
+  known `id` replaces that Alert (moved to the end), beyond 8 the oldest is
+  dropped, and ALERT_CLEAR removes one. The card shows in Idle and Result while
+  any are queued and keeps showing the same Alert as others arrive; it takes
+  OK, UP and DOWN clicks only there, so it never takes OK from a Dictation.
+  Opening sends ALERT_OPEN and removes it (the Companion's TARGET_STATE follows);
+  dismissing sends ALERT_DISMISS. A double press is a separate DOUBLE event, so
+  double OK on the card toggles Voice Notes and leaves the Alert alone. Link
+  loss clears the queue; the Companion resends pending Alerts after HELLO.
 - **Voice Notes Recording.** Independent of Dictation: it records with the
   Mac's microphone, and NOTES_STATE never changes the state, the Dictation, the
   Target or the picker; it only updates the top bar and may show a toast.
@@ -253,3 +266,9 @@ Flash and observe with the serial log. Report the firmware hash with results.
     toast. Dictate meanwhile: text still lands in the Target. Double OK while
     dictating stops the recording and the Dictation continues. Starting or
     stopping in Voice Notes on the Mac shows on the Device within about 2 s.
+18. Alerts: let a Claude Code session in Orca finish a turn while another app
+    is frontmost: within about 2 s the Alert card shows its label and last
+    words; UP dismisses it, OK switches Orca to that session and the top bar
+    follows. Several Alerts page with DOWN and show `n/N`. While dictating only
+    the badge counts; the card appears after the result. A session that starts
+    working again drops its Alert; looking at it in Orca raises none.

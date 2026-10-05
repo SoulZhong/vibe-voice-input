@@ -84,6 +84,20 @@ Target 保存在 `~/.config/vibe-voice/target.json`，Device 和 Companion 重�
 旧版本在同一目录写过 `targets.toml` 和 `state.toml`；现在不再读取，也不会改动它们。可选的
 `~/.config/vibe-voice/vocabulary.txt` 每行一个词，用于让识别偏向项目术语。
 
+## 提醒
+
+Orca 中某个 agent 会话结束一轮、等待你回复时，Device 会显示提醒：会话（`<工作树> · <标题>`）和
+agent 最后说的话。按 OK 打开（跳转到该会话），按上忽略。
+
+- Orca 没有事件接口，因此 Device 连接期间 Companion 在后台线程每 2 秒执行一次
+  `orca terminal list --json`，从标题读取每个会话的状态：Claude Code 工作时显示转圈字形，等待时为
+  `✳`；Codex 及 Orca 认识的其他 agent 使用 Orca 自己写的标题（`Codex ready`、
+  `Codex - action required`）。Codex 工作时保留自己的标题，因此只有该标题能识别为工作中时 Codex 才会
+  提醒。无法识别的标题从不提醒。
+- 会话从工作中变为等待时才提醒；Companion 启动时已在等待的会话、以及你正在 Orca 中看着的会话都不
+  提醒。会话重新开始工作、你在 Mac 上打开它或它被关闭时，提醒消失。
+- `--orca-list` 会打印每个会话的 agent、状态以及提醒将显示的消息。
+
 ## Voice Notes 录音
 
 在 Device 上双击 OK，会在 Mac 应用 Voice Notes（`com.teemo.voice-notes`）中开始一场会议录音，或
@@ -107,7 +121,7 @@ Target 保存在 `~/.config/vibe-voice/target.json`，Device 和 Companion 重�
 ```bash
 target/release/vibe-voice --check        # 权限与识别器状态
 target/release/vibe-voice --notes-status # Voice Notes 录音状态（只读）
-target/release/vibe-voice --orca-list    # Device 将看到的 Orca Session 列表，当前会话标 *
+target/release/vibe-voice --orca-list    # Device 将看到的 Orca Session 列表，当前会话标 *，含 agent 状态和提醒文字
 # 把 16 kHz 单声道 16 位 WAV 经 ADPCM、协议逻辑和 Apple Speech 识别一遍。
 # 不会插入任何内容，只打印帧。
 say -v Tingting "把这个函数改成异步" -o /tmp/clip.wav --data-format=LEI16@16000 --file-format=WAVE
@@ -139,6 +153,7 @@ cat /tmp/sim.txt
 | `src/audio.rs` | AUDIO 帧转 PCM，丢帧处补静音 |
 | `src/session.rs` | Companion 状态机，依赖 `Injector` / `Recognizer` / `OrcaApi` trait |
 | `src/config.rs` | 支持的应用与保存的 Target（`target.json`） |
+| `src/alerts.rs` | 从终端标题得出 agent 状态、从预览提取提醒消息、跟踪状态变化 |
 | `src/voice_notes.rs` | Voice Notes socket 客户端、启动与工作线程 |
 | `src/orca.rs` | Orca CLI 客户端：从 `worktree ps` 与可视布局得出当前会话、启动、发送 |
 | `src/ble.rs`、`src/speech.rs`、`src/inject_macos.rs`、`src/ui.rs` | macOS 胶水层 |

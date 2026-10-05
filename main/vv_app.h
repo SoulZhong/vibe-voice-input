@@ -29,6 +29,9 @@
 #define VV_ITEM_LABEL_MAX   72
 #define VV_PICKER_MAX       24
 #define VV_STATUS_TEXT_MAX  96
+#define VV_ALERT_MAX        8      // oldest dropped beyond this
+#define VV_ALERT_LABEL_MAX  64
+#define VV_ALERT_MSG_MAX    120
 
 #define VV_DICTATION_LIMIT_MS   (5u * 60u * 1000u)
 // The Companion may launch Orca (up to 20 s) before it Inserts or lists.
@@ -111,7 +114,8 @@ typedef enum {
 #define VV_DIRTY_TOAST   0x20u
 #define VV_DIRTY_STATUS  0x40u
 #define VV_DIRTY_NOTES   0x80u
-#define VV_DIRTY_ALL     0xFFu
+#define VV_DIRTY_ALERTS  0x100u
+#define VV_DIRTY_ALL     0x1FFu
 
 // Actions. The controller executes them in this order:
 //   1. AUDIO_STOP (capture stopped, every AUDIO frame queued)
@@ -135,6 +139,14 @@ typedef struct {
     uint8_t flags;   // VV_ITEM_*
     char label[VV_ITEM_LABEL_MAX];
 } vv_item_t;
+
+// An Alert: an Orca agent session waits for the user.
+typedef struct {
+    uint8_t id;     // Companion's id, sent back in ALERT_OPEN / ALERT_DISMISS
+    uint8_t app;    // VV_APP_*
+    char label[VV_ALERT_LABEL_MAX];
+    char message[VV_ALERT_MSG_MAX];
+} vv_alert_t;
 
 typedef struct {
     vv_state_t state;
@@ -175,6 +187,12 @@ typedef struct {
     uint32_t notes_base_ms;       // when it arrived
     uint32_t notes_elapsed_s;     // shown
 
+    // Alerts, oldest first. The card shows alerts[alert_cursor] in IDLE and
+    // RESULT; elsewhere only a count badge.
+    vv_alert_t alerts[VV_ALERT_MAX];
+    uint8_t alert_count;
+    uint8_t alert_cursor;
+
     uint8_t picker_list;
     uint8_t picker_parent_flags;   // flags of the root row that opened the sub-list
     bool picker_loading;
@@ -202,6 +220,14 @@ uint32_t vv_app_take_dirty(vv_app_t *app);
 // The conversation part of the Target label ("<App> · <title>" -> "<title>"),
 // or the whole label when it has no title; "" when the Target is unknown.
 const char *vv_app_target_title(const vv_app_t *app);
+
+// Whether the Alert card is showing (IDLE or RESULT with an Alert queued).
+// While it shows, OK click opens, UP dismisses and DOWN shows the next one.
+bool vv_app_alert_card(const vv_app_t *app);
+
+// Count for the top-bar badge: the queued Alerts while the card cannot show
+// (dictating, waiting, picker), else 0.
+uint8_t vv_app_alert_badge(const vv_app_t *app);
 
 // Whether a Voice Notes Recording is starting, running, paused or stopping.
 bool vv_app_notes_active(const vv_app_t *app);

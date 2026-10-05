@@ -12,6 +12,7 @@
 //! Orca for an Insert or Submit). Insert, Submit and Undo bring the Target to
 //! the front first; a Jump in the Device picker sets it.
 
+use crate::alerts::{AlertEvent, AlertTracker};
 use crate::audio::AudioAssembler;
 use crate::config::{ORCA, ORCA_BUNDLE_ID, SUPPORTED_APPS, StoredTarget, supported_app};
 use crate::orca::{OrcaApi, OrcaError, OrcaSession, OrcaSnapshot};
@@ -346,6 +347,7 @@ pub struct Companion<I: Injector, R: Recognizer, O: OrcaApi> {
     last_status: Option<StatusCode>,
     outbox: Vec<CompanionFrame>,
     notes: Notes,
+    alerts: AlertTracker,
 }
 
 impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
@@ -372,6 +374,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             last_status: None,
             outbox: Vec::new(),
             notes: Notes::new(),
+            alerts: AlertTracker::default(),
         }
     }
 
@@ -404,6 +407,8 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         self.last_status = None;
         self.view = None;
         self.orca_rows.clear();
+        // The Device forgets its Alerts; start tracking afresh on relink.
+        self.alerts = AlertTracker::default();
     }
 
     // ----- frames ---------------------------------------------------------
@@ -428,6 +433,10 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
             DeviceFrame::TargetsReq { list } => self.on_targets_req(list, now),
             DeviceFrame::TargetSelect { list, index } => self.on_target_select(list, index, now),
             DeviceFrame::NotesToggle => self.on_notes_toggle(now),
+            DeviceFrame::AlertOpen { id } => self.on_alert_open(id, now),
+            DeviceFrame::AlertDismiss { id } => {
+                self.alerts.take(id);
+            }
         }
     }
 
@@ -451,6 +460,9 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         self.notes.sent = None;
         self.send_notes(NotesNotice::None, now);
         self.notes_poll();
+        for a in self.alerts.pending() {
+            self.send_alert(AlertEvent::Raise(a));
+        }
     }
 
     fn on_dict_start(&mut self, dict: u8, now: Instant) {
@@ -1244,6 +1256,96 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
     }
 }
 
+// ----- Alerts ----------------------------------------------------------------
+//
+// The Orca watch thread polls `orca terminal list` every 2 s while linked and
+// hands the snapshot over here; nothing on this path runs the CLI itself.
+
+impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
+    fn send_alert(&mut self, ev: AlertEvent) {
+        if self.view.is_none() {
+            return; // not past HELLO; pending Alerts are resent then
+        }
+        let f = match ev {
+            AlertEvent::Raise(a) => {
+                log::info!("Alert {}: {} — {}", a.id, a.label, a.message);
+                CompanionFrame::Alert {
+                    id: a.id,
+                    app: ORCA as u8,
+                    label: a.label,
+                    message: a.message,
+                }
+            }
+            AlertEvent::Clear { id } => CompanionFrame::AlertClear { id },
+        };
+        self.send(f);
+    }
+
+    /// A poll from the Orca watch thread: refresh the Orca cache and raise or
+    /// clear Alerts.
+    pub fn handle_orca_watch(&mut self, r: Result<OrcaSnapshot, OrcaError>, now: Instant) {
+        let snap = match r {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("Orca watch: {e}");
+                return;
+            }
+        };
+        let orca_front = self.injector.frontmost_bundle_id().as_deref() == Some(ORCA_BUNDLE_ID);
+        let looking_at = snap
+            .current()
+            .filter(|_| orca_front)
+            .map(|s| s.handle.clone());
+        let events = self.alerts.update(&snap.sessions, looking_at.as_deref());
+        self.orca_cache = Some((now, snap));
+        for ev in events {
+            self.send_alert(ev);
+        }
+    }
+
+    /// ALERT_OPEN: Jump to the Alert's session and reply TARGET_STATE.
+    fn on_alert_open(&mut self, id: u8, now: Instant) {
+        let Some(alert) = self.alerts.take(id) else {
+            log::info!("ALERT_OPEN {id}: no such Alert");
+            self.send(CompanionFrame::AlertClear { id });
+            let view = self.resolve(Need::Show, false, now).view;
+            self.send_state(view);
+            return;
+        };
+        let cached = self
+            .orca_cache
+            .as_ref()
+            .and_then(|(_, snap)| snap.sessions.iter().find(|s| s.handle == alert.handle))
+            .cloned();
+        let session = match cached {
+            Some(s) => Some(s),
+            None => self
+                .orca_snapshot(Need::Show, false, now)
+                .ok()
+                .and_then(|snap| snap.sessions.into_iter().find(|s| s.handle == alert.handle)),
+        };
+        let jumped = match session {
+            Some(s) => {
+                let r = self.orca_front(&s.handle, now);
+                match self.orca_status(r) {
+                    Status::Ok => {
+                        self.set_target(orca_target(&s));
+                        Ok(())
+                    }
+                    st => Err(st),
+                }
+            }
+            None => Err(Status::TargetUnavailable),
+        };
+        let mut view = self.resolve(Need::Show, false, now).view;
+        if let Err(status) = jumped {
+            view.status = status;
+        }
+        self.send_state(view);
+        self.report_health();
+    }
+}
+
 // ----- Voice Notes Recording ---------------------------------------------
 //
 // Voice Notes calls run on a worker thread (`voice_notes::NotesWorker`); this
@@ -1578,6 +1680,9 @@ mod tests {
             worktree_id: format!("repo::/src/{wt}"),
             worktree: wt.into(),
             title: title.into(),
+            raw_title: format!("✳ {title}"),
+            agent: Some("claude".into()),
+            preview: String::new(),
         }
     }
 
@@ -2931,5 +3036,151 @@ mod tests {
         c.handle_frame(DeviceFrame::NotesToggle, Instant::now());
         assert!(c.take_outbox().is_empty());
         assert_eq!(c.take_notes_ops(), [NotesOp::Start]);
+    }
+
+    // ----- Alerts ----------------------------------------------------------
+
+    fn watch_snap(c: &C, titles: &[(&str, &str)]) -> OrcaSnapshot {
+        let mut snap = c.orca.snap.clone();
+        for (h, t) in titles {
+            let s = snap.sessions.iter_mut().find(|s| s.handle == *h).unwrap();
+            s.raw_title = (*t).into();
+            s.preview = "测试都通过了，要提交吗？\n✻ Baked for 3s".into();
+        }
+        snap
+    }
+
+    fn alert_frames(out: &[CompanionFrame]) -> Vec<CompanionFrame> {
+        out.iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    CompanionFrame::Alert { .. } | CompanionFrame::AlertClear { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn alert_raised_on_turn_end_and_opened() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        let snaps_before = c.orca.snapshots;
+        let snap = watch_snap(&c, &[("term_c", "◐ PR")]);
+        c.handle_orca_watch(Ok(snap), t0);
+        assert!(
+            alert_frames(&c.take_outbox()).is_empty(),
+            "first sight never alerts"
+        );
+        let snap = watch_snap(&c, &[("term_c", "✳ PR")]);
+        c.handle_orca_watch(Ok(snap), t0 + Duration::from_secs(2));
+        assert_eq!(
+            c.take_outbox(),
+            [CompanionFrame::Alert {
+                id: 1,
+                app: 0,
+                label: "voice-notes · PR".into(),
+                message: "测试都通过了，要提交吗？".into()
+            }]
+        );
+        // The watch result fed the cache; the core path ran no CLI.
+        assert_eq!(c.orca.snapshots, snaps_before);
+        // A reconnect resends it after HELLO.
+        let out = hello(&mut c, t0 + Duration::from_secs(3));
+        assert!(matches!(
+            out.last().unwrap(),
+            CompanionFrame::Alert { id: 1, .. }
+        ));
+        // Open: Jump to that session.
+        c.handle_frame(
+            DeviceFrame::AlertOpen { id: 1 },
+            t0 + Duration::from_secs(4),
+        );
+        assert_eq!(c.take_outbox(), [orca_state("voice-notes · PR")]);
+        assert_eq!(c.orca.log, ["switch term_c"]);
+        assert_eq!(c.injector.log, [format!("activate {ORCA_BUNDLE_ID}")]);
+        assert!(
+            matches!(c.target(), Some(StoredTarget::Orca { handle, .. }) if handle == "term_c")
+        );
+        // A stale id: cleared on the Device, Target reported.
+        c.handle_frame(
+            DeviceFrame::AlertOpen { id: 1 },
+            t0 + Duration::from_secs(5),
+        );
+        let out = c.take_outbox();
+        assert_eq!(out[0], CompanionFrame::AlertClear { id: 1 });
+        assert!(matches!(out[1], CompanionFrame::TargetState { .. }));
+    }
+
+    #[test]
+    fn alert_cleared_dismissed_and_suppressed() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "◐ server")])), t0);
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "✳ server")])), t0);
+        assert_eq!(alert_frames(&c.take_outbox()).len(), 1);
+        // Working again: the Alert vanishes.
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "◑ server")])), t0);
+        assert_eq!(c.take_outbox(), [CompanionFrame::AlertClear { id: 1 }]);
+        // Dismissed on the Device: no Clear later, no repeat while waiting.
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "✳ server")])), t0);
+        c.take_outbox();
+        c.handle_frame(DeviceFrame::AlertDismiss { id: 1 }, t0);
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "◑ server")])), t0);
+        assert!(c.take_outbox().is_empty());
+        // The user is looking at it in Orca (frontmost, current): no Alert.
+        c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
+        c.handle_orca_watch(
+            Ok(watch_snap(
+                &c,
+                &[("term_a", "◐ 语音输入"), ("term_b", "◑ server")],
+            )),
+            t0,
+        );
+        c.handle_orca_watch(
+            Ok(watch_snap(
+                &c,
+                &[("term_a", "✳ 语音输入"), ("term_b", "◑ server")],
+            )),
+            t0,
+        );
+        assert!(alert_frames(&c.take_outbox()).is_empty());
+        // Errors from the watch are ignored.
+        c.handle_orca_watch(Err(OrcaError::Unavailable("down".into())), t0);
+        assert!(c.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn alerts_do_not_disturb_dictation() {
+        let mut c = companion();
+        let t0 = Instant::now();
+        hello(&mut c, t0);
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_c", "◐ PR")])), t0);
+        c.handle_frame(DeviceFrame::DictStart { dict: 1 }, t0);
+        partial(&mut c, 1, "你好", t0);
+        c.take_outbox();
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_c", "✳ PR")])), t0);
+        assert!(c.dictation_active());
+        assert!(matches!(
+            c.take_outbox()[..],
+            [CompanionFrame::Alert { .. }]
+        ));
+        c.handle_frame(DeviceFrame::DictStop { dict: 1 }, t0);
+        c.handle_recog(
+            RecogEvent::Final {
+                dict: 1,
+                text: "你好".into(),
+            },
+            t0,
+        );
+        assert_eq!(c.injector.log, [format!("insert {WECHAT} 你好")]);
+        // Link loss forgets Alerts; a relink starts tracking afresh.
+        c.on_disconnected();
+        hello(&mut c, t0);
+        c.handle_orca_watch(Ok(watch_snap(&c, &[("term_c", "✳ PR")])), t0);
+        assert!(alert_frames(&c.take_outbox()).is_empty());
     }
 }

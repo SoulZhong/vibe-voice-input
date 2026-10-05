@@ -46,6 +46,13 @@ size_t vv_proto_simple(vv_frame_t *f, uint8_t type) {
     return f->len = 1;
 }
 
+size_t vv_proto_alert_id(vv_frame_t *f, uint8_t type, uint8_t id) {
+    if (type != VV_MSG_ALERT_OPEN && type != VV_MSG_ALERT_DISMISS) return f->len = 0;
+    f->data[0] = type;
+    f->data[1] = id;
+    return f->len = 2;
+}
+
 size_t vv_proto_targets_req(vv_frame_t *f, uint8_t list) {
     f->data[0] = VV_MSG_TARGETS_REQ;
     f->data[1] = list;
@@ -71,6 +78,7 @@ bool vv_proto_decode(const uint8_t *data, size_t len, vv_msg_t *msg) {
     if (!data || len == 0 || len > VV_FRAME_MAX) return false;
     msg->type = data[0];
     msg->text = "";
+    msg->text2 = "";
     switch (msg->type) {
     case VV_MSG_HELLO_ACK:
         if (len < 2) return false;
@@ -99,6 +107,20 @@ bool vv_proto_decode(const uint8_t *data, size_t len, vv_msg_t *msg) {
         msg->c = data[3];
         msg->d = data[4];
         return with_text(data, len, 5, msg);
+    case VV_MSG_ALERT:
+        // id, app, label_len, label, message (rest of the frame)
+        if (len < 4 || (size_t)4 + data[3] > len) return false;
+        msg->a = data[1];
+        msg->b = data[2];
+        msg->text = (const char *)data + 4;
+        msg->text_len = data[3];
+        msg->text2 = (const char *)data + 4 + data[3];
+        msg->text2_len = len - 4 - data[3];
+        return true;
+    case VV_MSG_ALERT_CLEAR:
+        if (len < 2) return false;
+        msg->a = data[1];
+        return true;
     case VV_MSG_NOTES_STATE:
         if (len < 7) return false;
         msg->a = data[1];

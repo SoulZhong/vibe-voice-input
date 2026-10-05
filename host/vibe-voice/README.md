@@ -108,6 +108,26 @@ they are no longer read and are left untouched. Optional
 `~/.config/vibe-voice/vocabulary.txt` adds one phrase per line to bias
 recognition toward your project's terms.
 
+## Alerts
+
+When an agent session in Orca finishes its turn and waits for you, the Device
+shows an Alert: the session (`<worktree> · <title>`) and the agent's last
+words. OK opens it (Jumps to the session), UP dismisses it.
+
+- Orca has no event API, so the Companion polls `orca terminal list --json`
+  every 2 s while the Device is linked, on a background thread, and reads each
+  session's state from its title: Claude Code shows a spinner while working and
+  `✳` when waiting; Codex and the other agents Orca knows get Orca's own titles
+  (`Codex ready`, `Codex - action required`). Codex keeps its own title while
+  working, so a Codex turn alerts only when that title was recognizably working.
+  Unknown titles never alert.
+- An Alert is raised when a session goes from working to waiting, not for
+  sessions already waiting when the Companion starts, and not for the session
+  you are looking at in Orca. It disappears when the session works again, when
+  you open it on the Mac, or when it closes.
+- `--orca-list` prints each session's agent, state and the message an Alert
+  would carry.
+
 ## Voice Notes Recording
 
 Double-pressing OK on the Device starts a meeting recording in the Mac app
@@ -134,7 +154,7 @@ Dictation.
 ```bash
 target/release/vibe-voice --check        # permission and recognizer status
 target/release/vibe-voice --notes-status # Voice Notes recording status (read-only)
-target/release/vibe-voice --orca-list    # Orca Sessions as the Device sees them, Current Conversation marked *
+target/release/vibe-voice --orca-list    # Orca Sessions as the Device sees them, Current Conversation marked *, agent state and Alert text
 # Recognize a 16 kHz mono 16-bit WAV through ADPCM, protocol and Apple Speech.
 # Nothing is inserted; frames are printed.
 say -v Tingting "<Chinese sentence>" -o /tmp/clip.wav --data-format=LEI16@16000 --file-format=WAVE
@@ -167,6 +187,7 @@ Logs go to `~/Library/Logs/VibeVoice.log` when started from Finder (add
 | `src/audio.rs` | AUDIO frames to PCM, silence for lost frames |
 | `src/session.rs` | Companion state machine behind `Injector` / `Recognizer` / `OrcaApi` traits |
 | `src/config.rs` | Supported Apps and the stored Target (`target.json`) |
+| `src/alerts.rs` | Agent state from terminal titles, Alert message from the preview, transition tracking |
 | `src/voice_notes.rs` | Voice Notes socket client, launch, and the worker thread |
 | `src/orca.rs` | Orca CLI client: Current Conversation from `worktree ps` and visual layouts, launch, send |
 | `src/ble.rs`, `src/speech.rs`, `src/inject_macos.rs`, `src/ui.rs` | macOS glue |

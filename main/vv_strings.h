@@ -68,6 +68,10 @@
 #define VV_T_LIST_FAILED      "列表加载失败"
 #define VV_T_JUMPED           "已切换"
 
+// Alert card (an Orca agent session waits for the user).
+#define VV_T_ALERT_HINT       "OK 打开 · ▲ 忽略"
+#define VV_T_ALERT_NEXT       "▼ 下一条"
+
 // Voice Notes Recording: top bar ("录音 12:34") and toasts.
 #define VV_T_NOTES_REC        "录音"
 #define VV_T_NOTES_REC_SHORT  "录"

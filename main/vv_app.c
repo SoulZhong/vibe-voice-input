@@ -236,6 +236,78 @@ static void picker_jumped(vv_app_t *app, uint8_t status, uint32_t now_ms) {
 }
 
 // ---------------------------------------------------------------------------
+// Alerts
+
+bool vv_app_alert_card(const vv_app_t *app) {
+    return app->alert_count > 0 && (app->state == VV_ST_IDLE || app->state == VV_ST_RESULT);
+}
+
+uint8_t vv_app_alert_badge(const vv_app_t *app) {
+    if (!app->link_ready || vv_app_alert_card(app)) return 0;
+    return app->alert_count;
+}
+
+static void alert_remove_at(vv_app_t *app, uint8_t i) {
+    if (i >= app->alert_count) return;
+    memmove(&app->alerts[i], &app->alerts[i + 1],
+            (size_t)(app->alert_count - i - 1) * sizeof(vv_alert_t));
+    app->alert_count--;
+    if (app->alert_cursor > i || app->alert_cursor >= app->alert_count) {
+        app->alert_cursor = app->alert_cursor > 0 ? (uint8_t)(app->alert_cursor - 1) : 0;
+    }
+    if (app->alert_cursor >= app->alert_count) app->alert_cursor = 0;
+    app->dirty |= VV_DIRTY_ALERTS;
+}
+
+static int alert_find(const vv_app_t *app, uint8_t id) {
+    for (int i = 0; i < app->alert_count; i++) {
+        if (app->alerts[i].id == id) return i;
+    }
+    return -1;
+}
+
+// A newer Alert for the same id replaces the old one; beyond VV_ALERT_MAX the
+// oldest is dropped. The card keeps showing the Alert it showed.
+static void on_alert(vv_app_t *app, const vv_msg_t *msg) {
+    int old = alert_find(app, msg->a);
+    if (old >= 0) alert_remove_at(app, (uint8_t)old);
+    if (app->alert_count >= VV_ALERT_MAX) alert_remove_at(app, 0);
+    vv_alert_t *a = &app->alerts[app->alert_count++];
+    a->id = msg->a;
+    a->app = msg->b;
+    copy_text(a->label, sizeof(a->label), msg->text, msg->text_len, NULL);
+    copy_text(a->message, sizeof(a->message), msg->text2, msg->text2_len, NULL);
+    app->dirty |= VV_DIRTY_ALERTS;
+}
+
+static void alert_send(vv_app_t *app, uint8_t type, vv_actions_t *out) {
+    vv_frame_t *f = push_frame(out);
+    if (f) vv_proto_alert_id(f, type, app->alerts[app->alert_cursor].id);
+    alert_remove_at(app, app->alert_cursor);
+}
+
+// Buttons while the card shows. Returns false for presses it leaves alone.
+static bool alert_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, vv_actions_t *out) {
+    if (press != VV_PRESS_CLICK) return false;   // long OK still opens the picker
+    switch (btn) {
+    case VV_BTN_OK:
+        alert_send(app, VV_MSG_ALERT_OPEN, out);
+        if (app->state == VV_ST_RESULT) set_state(app, VV_ST_IDLE);
+        return true;
+    case VV_BTN_UP:
+        alert_send(app, VV_MSG_ALERT_DISMISS, out);
+        return true;
+    case VV_BTN_DOWN:
+        if (app->alert_count > 1) {
+            app->alert_cursor = (uint8_t)((app->alert_cursor + 1) % app->alert_count);
+            app->dirty |= VV_DIRTY_ALERTS;
+        }
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Voice Notes Recording
 
 static vv_toast_t notes_toast(uint8_t notice) {
@@ -292,6 +364,11 @@ static void drop_link(vv_app_t *app, vv_actions_t *out) {
     if (app->notes_state != VV_NOTES_IDLE) {
         app->notes_state = VV_NOTES_IDLE;   // unknown until the next HELLO
         app->dirty |= VV_DIRTY_NOTES;
+    }
+    if (app->alert_count) {
+        app->alert_count = 0;               // the Companion resends after HELLO
+        app->alert_cursor = 0;
+        app->dirty |= VV_DIRTY_ALERTS;
     }
     app->picker_loading = false;
     app->picker_jumping = false;
@@ -415,6 +492,14 @@ void vv_app_frame(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms, vv_action
     case VV_MSG_NOTES_STATE:
         on_notes_state(app, msg, now_ms);
         break;
+    case VV_MSG_ALERT:
+        on_alert(app, msg);
+        break;
+    case VV_MSG_ALERT_CLEAR: {
+        int i = alert_find(app, msg->a);
+        if (i >= 0) alert_remove_at(app, (uint8_t)i);
+        break;
+    }
     case VV_MSG_TARGET_STATE:
         app->target_known = true;
         app->target_status = msg->a;
@@ -449,6 +534,9 @@ void vv_app_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, uint32_t now_m
             break;
         }
     }
+    // The Alert card takes OK / UP / DOWN clicks in IDLE and RESULT only, so it
+    // never takes OK from a Dictation.
+    if (vv_app_alert_card(app) && alert_button(app, btn, press, out)) return;
     switch (app->state) {
     case VV_ST_IDLE:
     case VV_ST_RESULT:

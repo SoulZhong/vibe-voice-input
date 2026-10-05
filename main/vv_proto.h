@@ -25,6 +25,8 @@ enum {
     VV_MSG_TARGETS_REQ = 0x30,
     VV_MSG_TARGET_SELECT = 0x31,
     VV_MSG_NOTES_TOGGLE = 0x40,
+    VV_MSG_ALERT_OPEN = 0x50,
+    VV_MSG_ALERT_DISMISS = 0x51,
 };
 
 // Companion -> Device
@@ -38,6 +40,8 @@ enum {
     VV_MSG_TARGET_END = 0xB1,
     VV_MSG_TARGET_STATE = 0xB2,
     VV_MSG_NOTES_STATE = 0xC0,
+    VV_MSG_ALERT = 0xD0,
+    VV_MSG_ALERT_CLEAR = 0xD1,
 };
 
 // NOTES_STATE state: the Voice Notes Recording on the Mac.
@@ -115,6 +119,7 @@ size_t vv_proto_audio(vv_frame_t *f, uint8_t dict, uint16_t seq, int16_t pred,
 size_t vv_proto_simple(vv_frame_t *f, uint8_t type);              // SUBMIT/UNDO/NOTES_TOGGLE
 size_t vv_proto_targets_req(vv_frame_t *f, uint8_t list);
 size_t vv_proto_target_select(vv_frame_t *f, uint8_t list, uint8_t index);
+size_t vv_proto_alert_id(vv_frame_t *f, uint8_t type, uint8_t id);  // ALERT_OPEN/DISMISS
 
 // A decoded Companion frame. `text` points into the input buffer (not
 // terminated); `text_len` may be 0.
@@ -125,8 +130,10 @@ typedef struct {
     uint8_t c;       // ITEM count / STATE app / NOTES notice
     uint8_t d;       // ITEM flags
     uint32_t u32;    // NOTES elapsed seconds
-    const char *text;
+    const char *text;   // ALERT: the label
     size_t text_len;
+    const char *text2;  // ALERT: the message
+    size_t text2_len;
 } vv_msg_t;
 
 // Returns false for an unknown type or a payload shorter than its fixed part.

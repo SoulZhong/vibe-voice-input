@@ -70,6 +70,19 @@ static void test_decoder(void) {
            m.text_len == 1 && m.text[0] == 'W');
     assert(vv_proto_decode(state, 4, &m) && m.c == 2 && m.text_len == 0);
     assert(!vv_proto_decode(state, 3, &m));
+    // ALERT: id, app, label_len, label, message; ALERT_CLEAR: id.
+    const uint8_t al[] = { 0xD0, 7, 0, 2, 'w', 't', 'h', 'i' };
+    assert(vv_proto_decode(al, sizeof(al), &m) && m.a == 7 && m.b == 0);
+    assert(m.text_len == 2 && memcmp(m.text, "wt", 2) == 0);
+    assert(m.text2_len == 2 && memcmp(m.text2, "hi", 2) == 0);
+    assert(vv_proto_decode(al, 6, &m) && m.text2_len == 0);
+    assert(!vv_proto_decode(al, 5, &m) && !vv_proto_decode(al, 3, &m));
+    const uint8_t ac[] = { 0xD1, 7 };
+    assert(vv_proto_decode(ac, 2, &m) && m.a == 7 && !vv_proto_decode(ac, 1, &m));
+    vv_frame_t af;
+    assert(vv_proto_alert_id(&af, VV_MSG_ALERT_OPEN, 7) == 2 && af.data[0] == 0x50 &&
+           af.data[1] == 7);
+    assert(vv_proto_alert_id(&af, VV_MSG_SUBMIT, 7) == 0);
     // NOTES_STATE: state, elapsed u32 LE, notice.
     const uint8_t notes[] = { 0xC0, 1, 0x04, 0x03, 0x02, 0x01, 5 };
     assert(vv_proto_decode(notes, 7, &m) && m.a == 1 && m.u32 == 0x01020304u && m.c == 5);

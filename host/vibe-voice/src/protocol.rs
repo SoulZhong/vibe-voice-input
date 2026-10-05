@@ -31,6 +31,8 @@ pub mod ty {
     pub const TARGETS_REQ: u8 = 0x30;
     pub const TARGET_SELECT: u8 = 0x31;
     pub const NOTES_TOGGLE: u8 = 0x40;
+    pub const ALERT_OPEN: u8 = 0x50;
+    pub const ALERT_DISMISS: u8 = 0x51;
 
     pub const HELLO_ACK: u8 = 0x81;
     pub const STATUS: u8 = 0x82;
@@ -41,6 +43,8 @@ pub mod ty {
     pub const TARGET_END: u8 = 0xB1;
     pub const TARGET_STATE: u8 = 0xB2;
     pub const NOTES_STATE: u8 = 0xC0;
+    pub const ALERT: u8 = 0xD0;
+    pub const ALERT_CLEAR: u8 = 0xD1;
 }
 
 /// RESULT / ACTION_RESULT / TARGET_STATE status.
@@ -171,6 +175,14 @@ pub enum DeviceFrame {
     },
     /// Start or stop a Voice Notes Recording.
     NotesToggle,
+    /// Open an Alert: Jump to its session.
+    AlertOpen {
+        id: u8,
+    },
+    /// Drop an Alert.
+    AlertDismiss {
+        id: u8,
+    },
 }
 
 /// A frame sent by the Companion.
@@ -214,6 +226,17 @@ pub enum CompanionFrame {
         /// [`APP_NONE`].
         app: u8,
         label: String,
+    },
+    /// An Orca agent session waits for the user.
+    Alert {
+        id: u8,
+        /// Supported App index (0 = Orca).
+        app: u8,
+        label: String,
+        message: String,
+    },
+    AlertClear {
+        id: u8,
     },
     NotesState {
         state: NotesState,
@@ -338,6 +361,14 @@ impl DeviceFrame {
                 }
             }
             ty::NOTES_TOGGLE => DeviceFrame::NotesToggle,
+            ty::ALERT_OPEN => {
+                need(bytes, 2)?;
+                DeviceFrame::AlertOpen { id: bytes[1] }
+            }
+            ty::ALERT_DISMISS => {
+                need(bytes, 2)?;
+                DeviceFrame::AlertDismiss { id: bytes[1] }
+            }
             other => return Err(DecodeError::UnknownType(other)),
         })
     }
@@ -368,6 +399,8 @@ impl DeviceFrame {
             DeviceFrame::TargetsReq { list } => vec![ty::TARGETS_REQ, *list],
             DeviceFrame::TargetSelect { list, index } => vec![ty::TARGET_SELECT, *list, *index],
             DeviceFrame::NotesToggle => vec![ty::NOTES_TOGGLE],
+            DeviceFrame::AlertOpen { id } => vec![ty::ALERT_OPEN, *id],
+            DeviceFrame::AlertDismiss { id } => vec![ty::ALERT_DISMISS, *id],
         }
     }
 }
@@ -421,6 +454,21 @@ impl CompanionFrame {
                 vec![ty::TARGET_STATE, *status as u8, *kind as u8, *app],
                 label,
             ),
+            CompanionFrame::Alert {
+                id,
+                app,
+                label,
+                message,
+            } => {
+                // Label first (its length byte), then the message in the rest.
+                let label = utf8_head(label, 63);
+                let mut v = vec![ty::ALERT, *id, *app, label.len() as u8];
+                v.extend_from_slice(label.as_bytes());
+                let room = MAX_FRAME - v.len();
+                v.extend_from_slice(utf8_head(message, room).as_bytes());
+                v
+            }
+            CompanionFrame::AlertClear { id } => vec![ty::ALERT_CLEAR, *id],
             CompanionFrame::NotesState {
                 state,
                 elapsed_s,
@@ -547,6 +595,29 @@ impl CompanionFrame {
                     app: bytes[3],
                     label: text(4)?,
                 }
+            }
+            ty::ALERT => {
+                need(bytes, 4)?;
+                let n = usize::from(bytes[3]);
+                if 4 + n > bytes.len() {
+                    return Err(DecodeError::Truncated {
+                        ty: t,
+                        len: bytes.len(),
+                    });
+                }
+                let label = std::str::from_utf8(&bytes[4..4 + n])
+                    .map_err(|_| DecodeError::BadUtf8 { ty: t })?
+                    .to_owned();
+                CompanionFrame::Alert {
+                    id: bytes[1],
+                    app: bytes[2],
+                    label,
+                    message: text(4 + n)?,
+                }
+            }
+            ty::ALERT_CLEAR => {
+                need(bytes, 2)?;
+                CompanionFrame::AlertClear { id: bytes[1] }
             }
             ty::NOTES_STATE => {
                 need(bytes, 7)?;
@@ -711,6 +782,41 @@ mod tests {
             .encode(),
             vec![0xB2, 3, 2, 0, b'o']
         );
+    }
+
+    #[test]
+    fn alert_frames_layout() {
+        assert_eq!(DeviceFrame::AlertOpen { id: 7 }.encode(), vec![0x50, 7]);
+        assert_eq!(
+            DeviceFrame::decode(&[0x51, 9]).unwrap(),
+            DeviceFrame::AlertDismiss { id: 9 }
+        );
+        let f = CompanionFrame::Alert {
+            id: 3,
+            app: 0,
+            label: "wt · 修复".into(),
+            message: "好了".into(),
+        };
+        let b = f.encode();
+        assert_eq!(&b[..4], &[0xD0, 3, 0, "wt · 修复".len() as u8]);
+        assert_eq!(CompanionFrame::decode(&b).unwrap(), f);
+        // Never over 180 bytes, cut on character boundaries.
+        let big = CompanionFrame::Alert {
+            id: 1,
+            app: 0,
+            label: "标".repeat(40),
+            message: "消".repeat(80),
+        };
+        let b = big.encode();
+        assert!(b.len() <= MAX_FRAME);
+        let CompanionFrame::Alert { label, message, .. } = CompanionFrame::decode(&b).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(label, "标".repeat(21));
+        assert!(!message.is_empty());
+        assert_eq!(CompanionFrame::AlertClear { id: 4 }.encode(), vec![0xD1, 4]);
+        assert!(CompanionFrame::decode(&[0xD0, 1, 0, 9, b'a']).is_err());
     }
 
     #[test]

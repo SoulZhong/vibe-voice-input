@@ -27,6 +27,12 @@ pub struct OrcaSession {
     pub worktree: String,
     /// Terminal title with leading status glyphs removed.
     pub title: String,
+    /// Title as Orca reports it (carries the agent's state, see `alerts`).
+    pub raw_title: String,
+    /// Agent running in the terminal (`agentIdentity`, e.g. "claude").
+    pub agent: Option<String>,
+    /// Tail of the terminal output.
+    pub preview: String,
 }
 
 impl OrcaSession {
@@ -96,6 +102,10 @@ struct RawTerminal {
     writable: bool,
     #[serde(default)]
     orphaned: bool,
+    #[serde(default)]
+    agent_identity: Option<String>,
+    #[serde(default)]
+    preview: String,
 }
 
 fn yes() -> bool {
@@ -172,6 +182,9 @@ pub fn parse_list(stdout: &str) -> Result<Vec<OrcaSession>, OrcaError> {
                 .unwrap_or("")
                 .to_owned(),
             title: clean_title(&t.title),
+            raw_title: t.title,
+            agent: t.agent_identity.filter(|a| !a.is_empty()),
+            preview: t.preview,
             handle: t.handle,
             leaf_id: t.leaf_id,
             worktree_id: t.worktree_id,
