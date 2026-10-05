@@ -91,28 +91,43 @@ struct ErrorBody {
 #[serde(rename_all = "camelCase")]
 struct RawTerminal {
     handle: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     leaf_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     worktree_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     worktree_path: String,
-    #[serde(default)]
+    // Orca reports `"title": null` for a terminal that has not set one yet.
+    #[serde(default, deserialize_with = "null_default")]
     title: String,
-    #[serde(default = "yes")]
+    #[serde(default = "yes", deserialize_with = "null_yes")]
     connected: bool,
-    #[serde(default = "yes")]
+    #[serde(default = "yes", deserialize_with = "null_yes")]
     writable: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     orphaned: bool,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     preview: String,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// `null` reads as the type's default, like a missing field. One terminal
+/// with a null field must not make the whole list unreadable.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+fn null_yes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(true))
 }
 
 /// Strip leading spinner/status glyphs such as `✳ ` or `◐ `.
@@ -811,6 +826,23 @@ mod tests {
             parse_list(r#"{"ok":true,"result":{"terminals":[]}}"#).unwrap(),
             vec![]
         );
+    }
+
+    #[test]
+    fn null_fields_read_as_missing() {
+        // Orca 1.4.218 reports `"title": null` for a terminal without a title.
+        let s = parse_list(
+            r#"{"ok":true,"result":{"terminals":[
+              {"handle":"term_a","title":null,"worktreePath":"/x/repo","preview":null,
+               "connected":null,"writable":true,"orphaned":null,"agentIdentity":null},
+              {"handle":"term_b","title":"✳ 任务","worktreePath":"/x/repo"}
+            ]}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].title, "");
+        assert_eq!(s[0].label(), "repo");
+        assert_eq!(s[1].title, "任务");
     }
 
     #[test]
