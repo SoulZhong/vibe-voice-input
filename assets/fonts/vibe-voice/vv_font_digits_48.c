@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 48 px
  * Bpp: 4
- * Opts: --font <noto-src>/NotoSansSC-Medium.otf --symbols 0123456789  --size 48 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h --lv-font-name vv_font_digits_48 --output /Users/teemo/workspace-soul/my-passport/assets/fonts/vibe-voice/vv_font_digits_48.c --lv-fallback vv_font_title_24
+ * Opts: --font <noto-src>/NotoSansSC-Medium.otf --symbols 0123456789  --size 48 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h --lv-font-name vv_font_digits_48 --output assets/fonts/vibe-voice/vv_font_digits_48.c --lv-fallback vv_font_title_24
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE

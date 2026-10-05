@@ -160,7 +160,8 @@ def conv(font: Path, size: int, name: str, ranges: str | None, symbols: str | No
     command += [
         "--size", str(size), "--bpp", "4", "--format", "lvgl", "--no-compress",
         "--lv-include", "lvgl.h", "--lv-font-name", name,
-        "--output", str(OUT_DIR / f"{name}.c"),
+        # Relative to cwd=ROOT so the generated header holds no local path.
+        "--output", str((OUT_DIR / f"{name}.c").relative_to(ROOT)),
     ]
     if fallback:
         command += ["--lv-fallback", fallback]
