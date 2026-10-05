@@ -31,6 +31,10 @@ One live Orca-managed terminal. Text is delivered directly to it without focus o
 Choosing a conversation in the Device picker: it becomes the Target and is brought to the front. The picker opens with the Current Conversation highlighted.
 _Avoid_: pin
 
+**Alert**:
+A notice on the Device that an Orca agent session finished its turn and is waiting for the user. Opening it Jumps to that session; dismissing it drops it. One pending Alert per session; it disappears when the session starts working again.
+_Avoid_: notification, message
+
 **Voice Notes Recording**:
 A meeting recording in the Mac app Voice Notes, captured by the Mac's microphone (not the Device's). Double-pressing OK starts one, or stops the one in progress; Voice Notes is launched if needed. It is not a Supported App and never receives Inserts.
 _Avoid_: dictation, note
