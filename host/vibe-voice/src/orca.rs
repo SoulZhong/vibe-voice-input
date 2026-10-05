@@ -33,6 +33,9 @@ pub struct OrcaSession {
     pub agent: Option<String>,
     /// Tail of the terminal output.
     pub preview: String,
+    /// The agent's last reply read from the rendered screen, filled in by the
+    /// Orca watch when the session just started waiting (see `alerts`).
+    pub reply: Option<String>,
 }
 
 impl OrcaSession {
@@ -185,6 +188,7 @@ pub fn parse_list(stdout: &str) -> Result<Vec<OrcaSession>, OrcaError> {
             raw_title: t.title,
             agent: t.agent_identity.filter(|a| !a.is_empty()),
             preview: t.preview,
+            reply: None,
             handle: t.handle,
             leaf_id: t.leaf_id,
             worktree_id: t.worktree_id,
@@ -337,6 +341,21 @@ pub fn parse_snapshot(
     })
 }
 
+/// Rendered screen lines from `orca terminal read --screen --json`
+/// (`result.terminal.tail`).
+pub fn parse_screen(stdout: &str) -> Result<Vec<String>, OrcaError> {
+    let result = check_envelope(stdout, true, "")?
+        .ok_or_else(|| OrcaError::Unavailable("unexpected read reply".into()))?;
+    Ok(result
+        .get("terminal")
+        .and_then(|t| t.get("tail"))
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.as_str().map(str::to_owned))
+        .collect())
+}
+
 /// Text for a terminal: line breaks would submit the prompt, so they become
 /// spaces; other control characters are dropped.
 pub fn sanitize_terminal_text(text: &str) -> String {
@@ -458,9 +477,25 @@ pub struct OrcaClient<R: CommandRunner> {
     runner: R,
 }
 
+/// How long one screen read may take (on the Orca watch thread).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(3);
+
 impl<R: CommandRunner> OrcaClient<R> {
     pub fn new(runner: R) -> Self {
         Self { runner }
+    }
+
+    /// Read-only: the rendered screen of one terminal.
+    pub fn read_screen(&mut self, handle: &str) -> Result<Vec<String>, OrcaError> {
+        let args = vec![
+            "terminal".to_owned(),
+            "read".to_owned(),
+            format!("--terminal={handle}"),
+            "--screen".to_owned(),
+            "--json".to_owned(),
+        ];
+        let out = self.run_raw(&args, READ_TIMEOUT)?;
+        parse_screen(&out.stdout)
     }
 
     fn call(&mut self, args: Vec<String>) -> Result<Option<serde_json::Value>, OrcaError> {
@@ -744,6 +779,21 @@ mod tests {
         assert_eq!(
             active_leaf_handle(&serde_json::json!({"type":"group","tabs":[]})),
             None
+        );
+    }
+
+    #[test]
+    fn parses_screen_reply() {
+        let json = r#"{"ok":true,"result":{"terminal":{"handle":"t","status":"running",
+            "tail":["line one","  line two"],"truncated":false}}}"#;
+        assert_eq!(parse_screen(json).unwrap(), ["line one", "  line two"]);
+        assert_eq!(
+            parse_screen(r#"{"ok":true,"result":{"terminal":{}}}"#).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_screen(r#"{"ok":false,"error":{"code":"terminal_handle_stale"}}"#),
+            Err(OrcaError::Stale)
         );
     }
 

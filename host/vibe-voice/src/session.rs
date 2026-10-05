@@ -12,7 +12,7 @@
 //! Orca for an Insert or Submit). Insert, Submit and Undo bring the Target to
 //! the front first; a Jump in the Device picker sets it.
 
-use crate::alerts::{AlertEvent, AlertTracker};
+use crate::alerts::{AlertEvent, AlertTracker, ClearReason};
 use crate::audio::AudioAssembler;
 use crate::config::{ORCA, ORCA_BUNDLE_ID, SUPPORTED_APPS, StoredTarget, supported_app};
 use crate::orca::{OrcaApi, OrcaError, OrcaSession, OrcaSnapshot};
@@ -20,7 +20,7 @@ use crate::protocol::{
     APP_NONE, Action, CompanionFrame, DeviceFrame, FLAG_CURRENT, FLAG_NOT_RUNNING, FLAG_SUBLIST,
     LIST_ORCA, LIST_ROOT, PROTOCOL_VERSION, Status, StatusCode, TargetKind, utf8_head,
 };
-use crate::protocol::{NotesNotice, NotesState};
+use crate::protocol::{NotesNotice, NotesState, alert_frames};
 use crate::voice_notes::{
     NotesError, NotesOp, NotesPhase, NotesReply, NotesStatus, RISK_BLUETOOTH_MIC,
     RISK_VOICE_ISOLATION,
@@ -1266,19 +1266,27 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
         if self.view.is_none() {
             return; // not past HELLO; pending Alerts are resent then
         }
-        let f = match ev {
+        match ev {
             AlertEvent::Raise(a) => {
-                log::info!("Alert {}: {} — {}", a.id, a.label, a.message);
-                CompanionFrame::Alert {
-                    id: a.id,
-                    app: ORCA as u8,
-                    label: a.label,
-                    message: a.message,
+                log::info!(
+                    "Alert {} raised: {} ({} bytes of message)",
+                    a.id,
+                    a.label,
+                    a.message.len()
+                );
+                for f in alert_frames(a.id, ORCA as u8, &a.label, &a.message) {
+                    self.send(f);
                 }
             }
-            AlertEvent::Clear { id } => CompanionFrame::AlertClear { id },
-        };
-        self.send(f);
+            AlertEvent::Clear { id, reason } => {
+                let why = match reason {
+                    ClearReason::Working => "working again",
+                    ClearReason::Closed => "session closed",
+                };
+                log::info!("Alert {id} cleared: {why}");
+                self.send(CompanionFrame::AlertClear { id });
+            }
+        }
     }
 
     /// A poll from the Orca watch thread: refresh the Orca cache and raise or
@@ -1291,12 +1299,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
                 return;
             }
         };
-        let orca_front = self.injector.frontmost_bundle_id().as_deref() == Some(ORCA_BUNDLE_ID);
-        let looking_at = snap
-            .current()
-            .filter(|_| orca_front)
-            .map(|s| s.handle.clone());
-        let events = self.alerts.update(&snap.sessions, looking_at.as_deref());
+        let events = self.alerts.update(&snap.sessions);
         self.orca_cache = Some((now, snap));
         for ev in events {
             self.send_alert(ev);
@@ -1683,6 +1686,7 @@ mod tests {
             raw_title: format!("✳ {title}"),
             agent: Some("claude".into()),
             preview: String::new(),
+            reply: None,
         }
     }
 
@@ -3115,7 +3119,7 @@ mod tests {
     }
 
     #[test]
-    fn alert_cleared_dismissed_and_suppressed() {
+    fn alert_cleared_dismissed_and_focus_independent() {
         let mut c = companion();
         let t0 = Instant::now();
         hello(&mut c, t0);
@@ -3131,7 +3135,8 @@ mod tests {
         c.handle_frame(DeviceFrame::AlertDismiss { id: 1 }, t0);
         c.handle_orca_watch(Ok(watch_snap(&c, &[("term_b", "◑ server")])), t0);
         assert!(c.take_outbox().is_empty());
-        // The user is looking at it in Orca (frontmost, current): no Alert.
+        // Mirrors Orca's notifications: the session the user is looking at
+        // in Orca (frontmost, current) alerts too, and stays until it works.
         c.injector.frontmost = Some(ORCA_BUNDLE_ID.into());
         c.handle_orca_watch(
             Ok(watch_snap(
@@ -3147,7 +3152,19 @@ mod tests {
             )),
             t0,
         );
-        assert!(alert_frames(&c.take_outbox()).is_empty());
+        let out = alert_frames(&c.take_outbox());
+        assert!(
+            matches!(out[..], [CompanionFrame::Alert { id: 2, .. }]),
+            "{out:?}"
+        );
+        c.handle_orca_watch(
+            Ok(watch_snap(
+                &c,
+                &[("term_a", "✳ 语音输入"), ("term_b", "◑ server")],
+            )),
+            t0,
+        );
+        assert!(c.take_outbox().is_empty(), "focus does not clear it");
         // Errors from the watch are ignored.
         c.handle_orca_watch(Err(OrcaError::Unavailable("down".into())), t0);
         assert!(c.take_outbox().is_empty());

@@ -69,8 +69,9 @@
 #define VV_T_JUMPED           "已切换"
 
 // Alert card (an Orca agent session waits for the user).
+#define VV_T_ALERT_TITLE      "提醒"
 #define VV_T_ALERT_HINT       "OK 打开 · ▲ 忽略"
-#define VV_T_ALERT_NEXT       "▼ 下一条"
+#define VV_T_ALERT_NEXT_FMT   "▼ 下一条（共 %u 条）"
 
 // Voice Notes Recording: top bar ("录音 12:34") and toasts.
 #define VV_T_NOTES_REC        "录音"

@@ -503,23 +503,37 @@ static void test_alerts(void) {
     assert(vv_app_take_dirty(&app) & VV_DIRTY_ALERTS);
     alert(2, "wt-b · docs", "Done");
     alert(3, "wt-c · pr", "Merge?");
-    assert(app.alert_count == 3 && app.alert_cursor == 0);
+    // Every new Alert pops up: the card shows the newest, numbered 1/3.
+    assert(app.alert_count == 3 && app.alerts[app.alert_cursor].id == 3);
+    assert(vv_app_alert_position(&app) == 1);
 
-    // DOWN pages through; a replaced Alert moves to the end with new text.
+    // DOWN goes to older ones and wraps to the newest.
     press(VV_BTN_DOWN, VV_PRESS_CLICK);
-    assert(app.alert_cursor == 1 && act.frame_count == 0);
+    assert(app.alerts[app.alert_cursor].id == 2 && vv_app_alert_position(&app) == 2);
+    assert(act.frame_count == 0);
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);
+    assert(app.alerts[app.alert_cursor].id == 3);
+    press(VV_BTN_DOWN, VV_PRESS_CLICK);              // back on 2
+    // A clear of another Alert keeps the shown one.
+    const uint8_t clear3[] = { 0xD1, 3 };
+    frame(clear3, sizeof(clear3));
+    assert(app.alert_count == 2 && app.alerts[app.alert_cursor].id == 2);
+    // A replaced Alert moves to the end with new text and pops up again.
+    alert(3, "wt-c · pr", "Merge?");
     alert(1, "wt-a · fix", "Still waiting");
     assert(app.alert_count == 3 && app.alerts[2].id == 1 &&
            strcmp(app.alerts[2].message, "Still waiting") == 0);
-    assert(app.alerts[app.alert_cursor].id == 2);   // still showing the same one
+    assert(app.alerts[app.alert_cursor].id == 1);
 
-    // UP dismisses, OK opens (and sends nothing else).
+    // UP dismisses and shows the newest remaining; OK opens it.
     press(VV_BTN_UP, VV_PRESS_CLICK);
-    assert(sent_alert(VV_MSG_ALERT_DISMISS, 2) && app.alert_count == 2);
+    assert(sent_alert(VV_MSG_ALERT_DISMISS, 1) && app.alert_count == 2);
     assert(app.state == VV_ST_IDLE && act.flags == 0);
-    press(VV_BTN_OK, VV_PRESS_CLICK);           // queue is [3, 1], card on 3
+    assert(app.alerts[app.alert_cursor].id == 3);    // queue [2, 3]
+    press(VV_BTN_OK, VV_PRESS_CLICK);
     assert(sent_alert(VV_MSG_ALERT_OPEN, 3) && act.flags == 0);
-    assert(app.alert_count == 1 && app.alerts[0].id == 1 && app.state == VV_ST_IDLE);
+    assert(app.alert_count == 1 && app.alerts[0].id == 2 && app.state == VV_ST_IDLE);
 
     // Double OK on the card toggles Voice Notes, never opens the Alert.
     press(VV_BTN_OK, VV_PRESS_DOUBLE);
@@ -556,6 +570,40 @@ static void test_alerts(void) {
     // Back in RESULT the card shows again and takes the click.
     press(VV_BTN_OK, VV_PRESS_CLICK);
     assert(sent_alert(VV_MSG_ALERT_OPEN, 5) && app.state == VV_ST_IDLE);
+}
+
+static void alert_more(uint8_t id, uint16_t offset, const char *text) {
+    uint8_t data[VV_FRAME_MAX] = { 0xD2, id, (uint8_t)offset, (uint8_t)(offset >> 8) };
+    size_t n = strlen(text);
+    memcpy(&data[4], text, n);
+    frame(data, 4 + n);
+}
+
+static void test_alert_more(void) {
+    connect_ready();
+    alert(4, "wt · t", "Hello ");
+    alert_more(4, 6, "world, ");
+    alert_more(4, 13, "again.");
+    assert(strcmp(app.alerts[0].message, "Hello world, again.") == 0);
+    assert(app.alerts[0].msg_rx == 19);
+    // Out of order, duplicate or unknown: ignored.
+    alert_more(4, 6, "dup");
+    alert_more(4, 40, "gap");
+    alert_more(9, 19, "other");
+    assert(strcmp(app.alerts[0].message, "Hello world, again.") == 0);
+    // Up to ~360 bytes arrive over several frames.
+    char part[121];
+    memset(part, 'a', 120);
+    part[120] = '\0';
+    alert(5, "wt · long", part);
+    alert_more(5, 120, part);
+    alert_more(5, 240, part);
+    assert(strlen(app.alerts[1].message) == 360 && app.alerts[1].msg_rx == 360);
+    alert_more(5, 360, "zzzz");                     // would not fit: ignored
+    assert(strlen(app.alerts[1].message) == 360);
+    vv_msg_t m;
+    const uint8_t short_more[] = { 0xD2, 1, 0 };
+    assert(!vv_proto_decode(short_more, sizeof(short_more), &m));
 }
 
 static void test_alert_queue_cap_and_states(void) {
@@ -635,6 +683,7 @@ int main(void) {
     test_voice_notes();
     test_alerts();
     test_alert_queue_cap_and_states();
+    test_alert_more();
     test_status_and_target();
     puts("test_vv_app: PASS");
     return 0;

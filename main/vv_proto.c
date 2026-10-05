@@ -117,6 +117,12 @@ bool vv_proto_decode(const uint8_t *data, size_t len, vv_msg_t *msg) {
         msg->text2 = (const char *)data + 4 + data[3];
         msg->text2_len = len - 4 - data[3];
         return true;
+    case VV_MSG_ALERT_MORE:
+        // id, offset u16, text (rest)
+        if (len < 4) return false;
+        msg->a = data[1];
+        msg->u32 = (uint32_t)data[2] | ((uint32_t)data[3] << 8);
+        return with_text(data, len, 4, msg);
     case VV_MSG_ALERT_CLEAR:
         if (len < 2) return false;
         msg->a = data[1];

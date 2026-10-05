@@ -77,6 +77,10 @@ static void test_decoder(void) {
     assert(m.text2_len == 2 && memcmp(m.text2, "hi", 2) == 0);
     assert(vv_proto_decode(al, 6, &m) && m.text2_len == 0);
     assert(!vv_proto_decode(al, 5, &m) && !vv_proto_decode(al, 3, &m));
+    const uint8_t more[] = { 0xD2, 7, 0x2C, 0x01, 'o', 'k' };
+    assert(vv_proto_decode(more, sizeof(more), &m) && m.a == 7 && m.u32 == 300 &&
+           m.text_len == 2 && memcmp(m.text, "ok", 2) == 0);
+    assert(vv_proto_decode(more, 4, &m) && m.text_len == 0 && !vv_proto_decode(more, 3, &m));
     const uint8_t ac[] = { 0xD1, 7 };
     assert(vv_proto_decode(ac, 2, &m) && m.a == 7 && !vv_proto_decode(ac, 1, &m));
     vv_frame_t af;

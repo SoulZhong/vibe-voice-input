@@ -45,6 +45,7 @@ pub mod ty {
     pub const NOTES_STATE: u8 = 0xC0;
     pub const ALERT: u8 = 0xD0;
     pub const ALERT_CLEAR: u8 = 0xD1;
+    pub const ALERT_MORE: u8 = 0xD2;
 }
 
 /// RESULT / ACTION_RESULT / TARGET_STATE status.
@@ -238,6 +239,12 @@ pub enum CompanionFrame {
     AlertClear {
         id: u8,
     },
+    /// The next part of an Alert's message, at byte `offset` of the message.
+    AlertMore {
+        id: u8,
+        offset: u16,
+        text: String,
+    },
     NotesState {
         state: NotesState,
         /// Recording time so far (paused time excluded).
@@ -424,6 +431,34 @@ fn status_from(b: u8) -> Option<Status> {
     })
 }
 
+/// An Alert as frames: ALERT with the label and the head of the message,
+/// then ALERT_MORE frames with the rest, each cut on a UTF-8 boundary.
+pub fn alert_frames(id: u8, app: u8, label: &str, message: &str) -> Vec<CompanionFrame> {
+    let label = utf8_head(label, 63);
+    let head_room = MAX_FRAME - 4 - label.len();
+    let head = utf8_head(message, head_room);
+    let mut frames = vec![CompanionFrame::Alert {
+        id,
+        app,
+        label: label.to_owned(),
+        message: head.to_owned(),
+    }];
+    let mut offset = head.len();
+    while offset < message.len() && offset <= usize::from(u16::MAX) {
+        let part = utf8_head(&message[offset..], MAX_FRAME - 4);
+        if part.is_empty() {
+            break;
+        }
+        frames.push(CompanionFrame::AlertMore {
+            id,
+            offset: offset as u16,
+            text: part.to_owned(),
+        });
+        offset += part.len();
+    }
+    frames
+}
+
 impl CompanionFrame {
     /// Encode to at most [`MAX_FRAME`] bytes. Text fields are cut to their tail.
     pub fn encode(&self) -> Vec<u8> {
@@ -469,6 +504,13 @@ impl CompanionFrame {
                 v
             }
             CompanionFrame::AlertClear { id } => vec![ty::ALERT_CLEAR, *id],
+            CompanionFrame::AlertMore { id, offset, text } => {
+                let mut v = vec![ty::ALERT_MORE, *id];
+                v.extend_from_slice(&offset.to_le_bytes());
+                let room = MAX_FRAME - v.len();
+                v.extend_from_slice(utf8_head(text, room).as_bytes());
+                v
+            }
             CompanionFrame::NotesState {
                 state,
                 elapsed_s,
@@ -618,6 +660,14 @@ impl CompanionFrame {
             ty::ALERT_CLEAR => {
                 need(bytes, 2)?;
                 CompanionFrame::AlertClear { id: bytes[1] }
+            }
+            ty::ALERT_MORE => {
+                need(bytes, 4)?;
+                CompanionFrame::AlertMore {
+                    id: bytes[1],
+                    offset: u16::from_le_bytes([bytes[2], bytes[3]]),
+                    text: text(4)?,
+                }
             }
             ty::NOTES_STATE => {
                 need(bytes, 7)?;
@@ -816,6 +866,34 @@ mod tests {
         assert_eq!(label, "标".repeat(21));
         assert!(!message.is_empty());
         assert_eq!(CompanionFrame::AlertClear { id: 4 }.encode(), vec![0xD1, 4]);
+        // Long messages continue in ALERT_MORE frames that rebuild the text.
+        let msg = "第".repeat(110) + "end";
+        let frames = alert_frames(5, 0, "wt · task", &msg);
+        assert!(frames.len() >= 2);
+        let mut rebuilt = String::new();
+        for f in &frames {
+            let b = f.encode();
+            assert!(b.len() <= MAX_FRAME);
+            match CompanionFrame::decode(&b).unwrap() {
+                CompanionFrame::Alert { message, .. } => rebuilt.push_str(&message),
+                CompanionFrame::AlertMore { id, offset, text } => {
+                    assert_eq!((id, usize::from(offset)), (5, rebuilt.len()));
+                    rebuilt.push_str(&text);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(rebuilt, msg);
+        assert_eq!(alert_frames(1, 0, "l", "short").len(), 1);
+        assert_eq!(
+            CompanionFrame::AlertMore {
+                id: 2,
+                offset: 300,
+                text: "x".into()
+            }
+            .encode(),
+            vec![0xD2, 2, 44, 1, b'x']
+        );
         assert!(CompanionFrame::decode(&[0xD0, 1, 0, 9, b'a']).is_err());
     }
 

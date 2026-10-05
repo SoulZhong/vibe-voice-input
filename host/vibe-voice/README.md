@@ -161,10 +161,14 @@ words. OK opens it (Jumps to the session), UP dismisses it.
   (`Codex ready`, `Codex - action required`). Codex keeps its own title while
   working, so a Codex turn alerts only when that title was recognizably working.
   Unknown titles never alert.
-- An Alert is raised when a session goes from working to waiting, not for
-  sessions already waiting when the Companion starts, and not for the session
-  you are looking at in Orca. It disappears when the session works again, when
-  you open it on the Mac, or when it closes.
+- An Alert is raised every time a session goes from working to waiting, like
+  Orca's own notification (also for the session Orca is showing), but not for
+  sessions already waiting when the Companion starts. Its message is read once
+  from the session's rendered screen (`orca terminal read --screen`): Claude
+  Code's recap, else its last reply. It disappears when the session works
+  again or closes, or when you open or dismiss it on the Device.
+- `--screen-message <handle>` prints the message the parser takes from one
+  terminal's screen (read-only).
 - `--orca-list` prints each session's agent, state and the message an Alert
   would carry.
 

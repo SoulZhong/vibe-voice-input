@@ -154,7 +154,12 @@ fn join_lines(a: &str, b: &str) -> String {
     if a.is_empty() {
         return b.to_owned();
     }
-    let space = a.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
+    // A space between ASCII text (words, or after ASCII punctuation); none
+    // around CJK, where wrapped lines join directly.
+    let space = a
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c.is_ascii_punctuation())
         && b.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
     if space {
         format!("{a} {b}")
@@ -222,9 +227,103 @@ pub fn preview_message(preview: &str) -> Option<String> {
 
 /// Shown when the preview has nothing readable.
 pub const DEFAULT_MESSAGE: &str = "等待你的回复";
-/// Byte budgets within one 180-byte ALERT frame (4 header bytes).
+/// Label budget within the ALERT frame; the message continues in
+/// ALERT_MORE frames up to [`MESSAGE_BYTES`].
 pub const LABEL_BYTES: usize = 63;
-pub const MESSAGE_BYTES: usize = 112;
+pub const MESSAGE_BYTES: usize = 360;
+
+/// Whether a screen line is a full-width rule (the prompt box borders).
+fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.chars().count() >= 8 && t.chars().all(|c| c == '─' || c == '━' || c == '═')
+}
+
+/// The agent's words from a rendered Claude Code screen
+/// (`orca terminal read --screen`): the "※ recap:" paragraph when present,
+/// else the last "⏺ " reply block that is not a tool call. Status lines, the
+/// prompt box and the status line rows below it are ignored.
+pub fn screen_message(lines: &[String]) -> Option<String> {
+    // Everything from the prompt box down is input and status rows: stop at
+    // the last rule that sits right above the "❯" prompt.
+    let end = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, l)| {
+            is_rule(l)
+                && lines
+                    .get(i + 1)
+                    .is_some_and(|n| n.trim_start().starts_with('❯'))
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+    let body = &lines[..end];
+
+    // Continuation lines of a block: indented, or blank between indented ones.
+    let block = |start: usize, first: &str| -> String {
+        let mut text = first.trim().to_owned();
+        for l in &body[start + 1..] {
+            if l.trim().is_empty() {
+                continue;
+            }
+            if !l.starts_with(' ') {
+                break;
+            }
+            let t = l.trim();
+            if t.starts_with('⎿') || is_chrome_line(t) {
+                continue;
+            }
+            text = join_lines(&text, t);
+        }
+        text
+    };
+
+    // (a) Claude Code's recap of the turn.
+    if let Some(i) = body.iter().rposition(|l| l.trim_start().starts_with('※')) {
+        let first = body[i].trim_start().trim_start_matches('※').trim();
+        let first = first.strip_prefix("recap:").unwrap_or(first).trim();
+        let mut text = block(i, first);
+        if let Some(cut) = text.find("(disable recaps") {
+            text.truncate(cut);
+        }
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(text.to_owned());
+        }
+    }
+    // (b) The last reply block that is not a tool call ("⏺ Bash(…)").
+    for (i, l) in body.iter().enumerate().rev() {
+        let Some(rest) = l.trim_start().strip_prefix('⏺') else {
+            continue;
+        };
+        let rest = rest.trim();
+        if is_tool_call(rest) || rest.is_empty() {
+            continue;
+        }
+        let text = block(i, rest);
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+
+/// "Bash(cargo test)", "Read(src/x.rs)", "Update(…)": a tool call header.
+fn is_tool_call(s: &str) -> bool {
+    match s.find('(') {
+        Some(i) if i > 0 => s[..i]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == ':' || c == '-'),
+        _ => false,
+    }
+}
+
+/// Box drawing and similar rows inside a block.
+fn is_chrome_line(t: &str) -> bool {
+    let chrome = t.chars().filter(|c| is_chrome_char(*c)).count();
+    chrome * 2 >= t.chars().count()
+}
 
 /// Keep the end of `s` within `max` bytes, with a leading `…` when cut.
 fn tail_within(s: &str, max: usize) -> String {
@@ -248,10 +347,54 @@ pub struct Alert {
     pub message: String,
 }
 
+/// Why an Alert went away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearReason {
+    /// The session started working again.
+    Working,
+    /// The session closed.
+    Closed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlertEvent {
     Raise(Alert),
-    Clear { id: u8 },
+    Clear { id: u8, reason: ClearReason },
+}
+
+/// The agent state of a listed session (agents only).
+pub fn session_state(s: &OrcaSession) -> AgentState {
+    if s.agent.is_some() {
+        title_state(&s.raw_title)
+    } else {
+        AgentState::Unknown
+    }
+}
+
+/// On the Orca watch thread: which sessions just went working → waiting, so
+/// their screens are read once (the tracker in the session repeats the same
+/// decision from the same snapshots).
+#[derive(Debug, Default)]
+pub struct TurnWatch {
+    last: HashMap<String, AgentState>,
+}
+
+impl TurnWatch {
+    pub fn turned_waiting(&mut self, sessions: &[OrcaSession]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = HashMap::new();
+        for s in sessions {
+            let state = session_state(s);
+            if self.last.get(&s.handle) == Some(&AgentState::Working)
+                && state == AgentState::Waiting
+            {
+                out.push(s.handle.clone());
+            }
+            seen.insert(s.handle.clone(), state);
+        }
+        self.last = seen;
+        out
+    }
 }
 
 /// Tracks each Orca Session's agent state across polls and raises an Alert
@@ -281,25 +424,16 @@ impl AlertTracker {
         id
     }
 
-    /// Feed one poll. `looking_at` is the session the user is looking at
-    /// (Orca frontmost and that session its Current Conversation).
-    pub fn update(
-        &mut self,
-        sessions: &[OrcaSession],
-        looking_at: Option<&str>,
-    ) -> Vec<AlertEvent> {
+    /// Feed one poll. Like Orca's own notifications, every turn end raises
+    /// an Alert, whether or not the user is looking at the session.
+    pub fn update(&mut self, sessions: &[OrcaSession]) -> Vec<AlertEvent> {
         let mut events = Vec::new();
         let mut seen = HashMap::new();
         for s in sessions {
-            let state = if s.agent.is_some() {
-                title_state(&s.raw_title)
-            } else {
-                AgentState::Unknown
-            };
+            let state = session_state(s);
             seen.insert(s.handle.clone(), state);
             let before = self.last.get(&s.handle).copied();
-            let watched = looking_at == Some(s.handle.as_str());
-            if before == Some(AgentState::Working) && state == AgentState::Waiting && !watched {
+            if before == Some(AgentState::Working) && state == AgentState::Waiting {
                 let id = self.id_for(&s.handle);
                 let title = clean_title(&s.raw_title);
                 let label = if s.worktree.is_empty() {
@@ -309,7 +443,12 @@ impl AlertTracker {
                 } else {
                     format!("{} · {title}", s.worktree)
                 };
-                let message = preview_message(&s.preview).unwrap_or_else(|| DEFAULT_MESSAGE.into());
+                let message = s
+                    .reply
+                    .clone()
+                    .filter(|r| !r.trim().is_empty())
+                    .or_else(|| preview_message(&s.preview))
+                    .unwrap_or_else(|| DEFAULT_MESSAGE.into());
                 let alert = Alert {
                     id,
                     handle: s.handle.clone(),
@@ -319,9 +458,12 @@ impl AlertTracker {
                 self.pending.insert(s.handle.clone(), alert.clone());
                 events.push(AlertEvent::Raise(alert));
             } else if let Some(a) = self.pending.get(&s.handle)
-                && (state != AgentState::Waiting || watched)
+                && state != AgentState::Waiting
             {
-                events.push(AlertEvent::Clear { id: a.id });
+                events.push(AlertEvent::Clear {
+                    id: a.id,
+                    reason: ClearReason::Working,
+                });
                 self.pending.remove(&s.handle);
             }
         }
@@ -334,7 +476,10 @@ impl AlertTracker {
             .collect();
         for h in gone {
             if let Some(a) = self.pending.remove(&h) {
-                events.push(AlertEvent::Clear { id: a.id });
+                events.push(AlertEvent::Clear {
+                    id: a.id,
+                    reason: ClearReason::Closed,
+                });
             }
         }
         self.last = seen;
@@ -450,6 +595,7 @@ mod tests {
             raw_title: title.into(),
             agent: agent.map(Into::into),
             preview: "改好了，要我提交吗？\n✻ Baked for 3s".into(),
+            reply: None,
         }
     }
 
@@ -468,11 +614,11 @@ mod tests {
         let c = Some("claude");
         // First sight never alerts, even when already waiting.
         assert!(
-            t.update(&[sess("a", "◐ 修复", c), sess("b", "✳ 文档", c)], None)
+            t.update(&[sess("a", "◐ 修复", c), sess("b", "✳ 文档", c)])
                 .is_empty()
         );
         // a: working -> waiting raises; b stays waiting: nothing.
-        let ev = t.update(&[sess("a", "✳ 修复", c), sess("b", "✳ 文档", c)], None);
+        let ev = t.update(&[sess("a", "✳ 修复", c), sess("b", "✳ 文档", c)]);
         assert_eq!(
             ev,
             [AlertEvent::Raise(Alert {
@@ -484,50 +630,48 @@ mod tests {
         );
         assert_eq!(t.pending().len(), 1);
         // Still waiting: no repeat.
-        assert!(t.update(&[sess("a", "✳ 修复", c)], None).is_empty());
+        assert!(t.update(&[sess("a", "✳ 修复", c)]).is_empty());
         // Working again: cleared; waiting again: raised with the same id.
         assert_eq!(
-            t.update(&[sess("a", "◓ 修复", c)], None),
-            [AlertEvent::Clear { id: 1 }]
+            t.update(&[sess("a", "◓ 修复", c)]),
+            [AlertEvent::Clear {
+                id: 1,
+                reason: ClearReason::Working
+            }]
         );
-        assert_eq!(raise_ids(&t.update(&[sess("a", "✳ 修复", c)], None)), [1]);
-        // The user opened it on the Mac (Orca frontmost, current): cleared.
-        assert_eq!(
-            t.update(&[sess("a", "✳ 修复", c)], Some("a")),
-            [AlertEvent::Clear { id: 1 }]
-        );
-        // A transition while the user looks at it: no Alert.
-        t.update(&[sess("a", "◐ 修复", c)], Some("a"));
-        assert!(t.update(&[sess("a", "✳ 修复", c)], Some("a")).is_empty());
+        assert_eq!(raise_ids(&t.update(&[sess("a", "✳ 修复", c)])), [1]);
+        // Still waiting (even while the user looks at it in Orca): kept.
+        assert!(t.update(&[sess("a", "✳ 修复", c)]).is_empty());
+        assert_eq!(t.pending().len(), 1);
         // Session closed: its pending Alert is cleared, no Alert for it.
-        t.update(&[sess("a", "◐ 修复", c)], None);
-        assert_eq!(raise_ids(&t.update(&[sess("a", "✳ 修复", c)], None)), [1]);
-        assert_eq!(t.update(&[], None), [AlertEvent::Clear { id: 1 }]);
-        assert!(t.update(&[sess("a", "✳ 修复", c)], None).is_empty());
+        t.update(&[sess("a", "◐ 修复", c)]);
+        assert_eq!(raise_ids(&t.update(&[sess("a", "✳ 修复", c)])), [1]);
+        assert_eq!(
+            t.update(&[]),
+            [AlertEvent::Clear {
+                id: 1,
+                reason: ClearReason::Closed
+            }]
+        );
+        assert!(t.update(&[sess("a", "✳ 修复", c)]).is_empty());
     }
 
     #[test]
     fn unknown_and_agentless_never_alert() {
         let mut t = AlertTracker::default();
-        t.update(
-            &[
-                sess("x", "◐ build", None),
-                sess("y", "Terminal 1", Some("claude")),
-            ],
-            None,
-        );
+        t.update(&[
+            sess("x", "◐ build", None),
+            sess("y", "Terminal 1", Some("claude")),
+        ]);
         assert!(
-            t.update(
-                &[sess("x", "✳ build", None), sess("y", "✳ y", Some("claude"))],
-                None
-            )
-            .is_empty()
+            t.update(&[sess("x", "✳ build", None), sess("y", "✳ y", Some("claude"))])
+                .is_empty()
         );
         // Codex through Orca's titles.
         let mut t = AlertTracker::default();
-        t.update(&[sess("c", "Codex", Some("codex"))], None);
+        t.update(&[sess("c", "Codex", Some("codex"))]);
         assert_eq!(
-            raise_ids(&t.update(&[sess("c", "Codex ready", Some("codex"))], None)),
+            raise_ids(&t.update(&[sess("c", "Codex ready", Some("codex"))])),
             [1]
         );
     }
@@ -537,10 +681,10 @@ mod tests {
         let mut t = AlertTracker::default();
         let c = Some("claude");
         let mut long = sess("a", "◐ x", c);
-        t.update(&[long.clone()], None);
+        t.update(&[long.clone()]);
         long.raw_title = format!("✳ {}", "很长的标题".repeat(20));
         long.preview = "结论".repeat(100);
-        let ev = t.update(&[long], None);
+        let ev = t.update(&[long]);
         let AlertEvent::Raise(a) = &ev[0] else {
             panic!()
         };
@@ -550,10 +694,107 @@ mod tests {
         assert_eq!(t.take(a.id), None);
         // Distinct sessions get distinct ids.
         let mut t = AlertTracker::default();
-        t.update(&[sess("a", "◐ a", c), sess("b", "◐ b", c)], None);
+        t.update(&[sess("a", "◐ a", c), sess("b", "◐ b", c)]);
         assert_eq!(
-            raise_ids(&t.update(&[sess("a", "✳ a", c), sess("b", "✳ b", c)], None)),
+            raise_ids(&t.update(&[sess("a", "✳ a", c), sess("b", "✳ b", c)])),
             [1, 2]
         );
+    }
+
+    fn screen(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    /// The shape of a rendered Claude Code screen after a turn (generic text).
+    const SCREEN: &str = "\
+⏺ Bash(cargo test --offline)
+  ⎿  test result: ok. 12 passed
+⏺ I updated the parser and the tests pass. The old path is
+  removed.
+
+  Should I also update the docs?
+✻ Churned for 2m 14s · done 8:14 PM
+※ recap: The parser now reads the screen. Next: decide whether to
+  update the docs. (disable recaps in /config)
+                                       ✔ Update installed · Restart to update
+──────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────
+  Project｜#12 example task
+  [Model] │ ~/src/example │ main
+  Context ██░░░░░░ 21%
+  ✓ Bash ×13 | ✓ Read ×4
+  ⏵⏵ auto mode on (shift+tab to cycle)
+⏺ 1
+◯ background task";
+
+    #[test]
+    fn screen_prefers_recap() {
+        assert_eq!(
+            screen_message(&screen(SCREEN)).as_deref(),
+            Some("The parser now reads the screen. Next: decide whether to update the docs.")
+        );
+    }
+
+    #[test]
+    fn screen_falls_back_to_last_reply_block() {
+        let no_recap: String = SCREEN
+            .lines()
+            .filter(|l| !l.contains("recap") && !l.contains("update the docs. (disable"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            screen_message(&screen(&no_recap)).as_deref(),
+            Some(
+                "I updated the parser and the tests pass. The old path is removed. Should I also update the docs?"
+            )
+        );
+        // Tool-call blocks and their output are skipped.
+        let tools = "⏺ Explaining first.\n⏺ Read(src/lib.rs)\n  ⎿  Read 40 lines\n✻ Baked for 3s\n────────────\n❯ \n────────────";
+        assert_eq!(
+            screen_message(&screen(tools)).as_deref(),
+            Some("Explaining first.")
+        );
+        // Chinese wraps join without spaces.
+        let zh = "⏺ 已经改好了，测试\n  全部通过。\n────────────\n❯\n────────────";
+        assert_eq!(
+            screen_message(&screen(zh)).as_deref(),
+            Some("已经改好了，测试全部通过。")
+        );
+        // Nothing readable: no message (the caller falls back).
+        let none = "✻ Churned for 1s\n────────────\n❯\n────────────\n⏺ 1";
+        assert_eq!(screen_message(&screen(none)), None);
+        assert_eq!(screen_message(&[]), None);
+    }
+
+    #[test]
+    fn turn_watch_matches_tracker() {
+        let c = Some("claude");
+        let mut w = TurnWatch::default();
+        assert!(
+            w.turned_waiting(&[sess("a", "✳ x", c)]).is_empty(),
+            "first sight"
+        );
+        w.turned_waiting(&[sess("a", "◐ x", c), sess("b", "◐ y", None)]);
+        assert_eq!(
+            w.turned_waiting(&[sess("a", "✳ x", c), sess("b", "✳ y", None)]),
+            ["a"]
+        );
+        assert!(w.turned_waiting(&[sess("a", "✳ x", c)]).is_empty());
+    }
+
+    #[test]
+    fn reply_from_screen_wins_and_is_capped() {
+        let c = Some("claude");
+        let mut t = AlertTracker::default();
+        t.update(&[sess("a", "◐ x", c)]);
+        let mut s = sess("a", "✳ x", c);
+        s.reply = Some("word ".repeat(100));
+        let ev = t.update(&[s]);
+        let AlertEvent::Raise(a) = &ev[0] else {
+            panic!()
+        };
+        assert!(a.message.len() <= MESSAGE_BYTES && a.message.starts_with('…'));
+        assert!(a.message.len() > 300, "uses the longer budget");
     }
 }

@@ -241,16 +241,17 @@ static void build_picker(void) {
 }
 
 static void build_alert(void) {
-    ui.alert = box(ui.scr, 16, 46, SCREEN_W - 32, 214, C_SURFACE, 14);
+    // Card: logo + "提醒 n/N" (amber), the session, then the agent's words.
+    ui.alert = box(ui.scr, 16, 44, SCREEN_W - 32, 220, C_SURFACE, 14);
     lv_obj_set_style_border_width(ui.alert, 1, 0);
     lv_obj_set_style_border_color(ui.alert, lv_color_hex(C_AMBER), 0);
-    ui.alert_logo = image(ui.alert, 12, 12);
-    ui.alert_label = text(ui.alert, FONT_BODY, C_AMBER, 40, 11, 120, LV_TEXT_ALIGN_LEFT);
+    ui.alert_logo = image(ui.alert, 12, 10);
+    ui.alert_pos = text(ui.alert, FONT_BODY, C_AMBER, 40, 9, 150, LV_TEXT_ALIGN_LEFT);
+    ui.alert_label = text(ui.alert, FONT_BODY, C_MUTED, 12, 36, SCREEN_W - 56, LV_TEXT_ALIGN_LEFT);
     lv_obj_set_height(ui.alert_label, 22);
     lv_label_set_long_mode(ui.alert_label, LV_LABEL_LONG_MODE_DOTS);
-    ui.alert_pos = text(ui.alert, FONT_BODY, C_MUTED, 160, 11, 36, LV_TEXT_ALIGN_RIGHT);
-    ui.alert_msg = text(ui.alert, FONT_BODY, C_TEXT, 12, 46, SCREEN_W - 56, LV_TEXT_ALIGN_LEFT);
-    lv_obj_set_height(ui.alert_msg, 7 * 21);
+    ui.alert_msg = text(ui.alert, FONT_BODY, C_TEXT, 12, 62, SCREEN_W - 56, LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_height(ui.alert_msg, 7 * 21);   // as many lines as fit
     lv_label_set_long_mode(ui.alert_msg, LV_LABEL_LONG_MODE_DOTS);
     show(ui.alert, false);
 
@@ -268,14 +269,15 @@ static void render_alerts(const vv_app_t *app) {
         bool logo = a->app < VV_APP_COUNT;
         if (logo) lv_image_set_src(ui.alert_logo, vv_icons_20[a->app]);
         show(ui.alert_logo, logo);
-        lv_label_set_text(ui.alert_label, a->label);
-        lv_label_set_text(ui.alert_msg, a->message);
         if (app->alert_count > 1) {
-            lv_label_set_text_fmt(ui.alert_pos, "%u/%u", (unsigned)app->alert_cursor + 1,
+            lv_label_set_text_fmt(ui.alert_pos, VV_T_ALERT_TITLE " %u/%u",
+                                  (unsigned)vv_app_alert_position(app),
                                   (unsigned)app->alert_count);
         } else {
-            lv_label_set_text(ui.alert_pos, "");
+            lv_label_set_text(ui.alert_pos, VV_T_ALERT_TITLE);
         }
+        lv_label_set_text(ui.alert_label, a->label);
+        lv_label_set_text(ui.alert_msg, a->message);
     }
     uint8_t badge = vv_app_alert_badge(app);
     show(ui.badge, badge > 0);
@@ -577,8 +579,10 @@ static void render_bottom(const vv_app_t *app) {
     case VV_ST_IDLE:
     case VV_ST_RESULT:
         if (vv_app_alert_card(app)) {
+            static char next[40];
+            snprintf(next, sizeof(next), VV_T_ALERT_NEXT_FMT, (unsigned)app->alert_count);
             h1 = VV_T_ALERT_HINT;
-            h2 = app->alert_count > 1 ? VV_T_ALERT_NEXT : "";
+            h2 = app->alert_count > 1 ? next : "";
         } else {
             h1 = VV_T_HINT_IDLE_1;
             h2 = VV_T_HINT_IDLE_2;

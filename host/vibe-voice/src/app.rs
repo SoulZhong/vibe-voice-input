@@ -65,6 +65,13 @@ pub fn main() {
         }
         Some("--orca-list") => orca_list(),
         Some("--notes-status") => notes_status(),
+        Some("--screen-message") => {
+            let Some(h) = args.iter().skip_while(|a| *a != "--screen-message").nth(1) else {
+                eprintln!("usage: vibe-voice --screen-message <terminal handle>");
+                std::process::exit(2);
+            };
+            screen_message_check(h);
+        }
         Some("--check") => check(),
         Some("-h" | "--help") => {
             println!(
@@ -72,6 +79,7 @@ pub fn main() {
                  vibe-voice --simulate <file>      recognize a 16 kHz mono 16-bit WAV/PCM file (no BLE, no insert)\n\
                  vibe-voice --orca-list            list Orca Sessions, Current Conversation first (read-only)\n\
                  vibe-voice --notes-status         Voice Notes recording status (read-only)\n\
+                 vibe-voice --screen-message <h>   Alert message parsed from a terminal screen (read-only)\n\
                  vibe-voice --check                show permission status"
             );
         }
@@ -166,15 +174,37 @@ fn core_loop(
             .name("orca-watch".into())
             .spawn(move || {
                 use std::sync::atomic::Ordering;
+                use vibe_voice::alerts::{TurnWatch, screen_message};
                 let mut client = OrcaClient::new(ProcessRunner::locate());
+                let mut turns = TurnWatch::default();
                 loop {
                     std::thread::sleep(HEALTH_INTERVAL);
                     if !linked.load(Ordering::Relaxed)
                         || !inject_macos::app_running(vibe_voice::config::ORCA_BUNDLE_ID)
                     {
+                        turns = TurnWatch::default();
                         continue;
                     }
-                    if tx.send(CoreEvent::OrcaWatch(client.snapshot())).is_err() {
+                    let mut snap = client.snapshot();
+                    // A session just finished its turn: read its rendered
+                    // screen once for the agent's reply (the list preview
+                    // holds only status lines). Read-only, bounded, and here
+                    // rather than on the core loop.
+                    if let Ok(snap) = snap.as_mut() {
+                        for handle in turns.turned_waiting(&snap.sessions) {
+                            let reply = match client.read_screen(&handle) {
+                                Ok(lines) => screen_message(&lines),
+                                Err(e) => {
+                                    log::info!("screen read for {handle}: {e}");
+                                    None
+                                }
+                            };
+                            if let Some(s) = snap.sessions.iter_mut().find(|s| s.handle == handle) {
+                                s.reply = reply;
+                            }
+                        }
+                    }
+                    if tx.send(CoreEvent::OrcaWatch(snap)).is_err() {
                         return;
                     }
                 }
@@ -307,6 +337,25 @@ fn orca_list() {
                 None => println!("Current Conversation: none"),
             }
             println!("{} Orca Sessions", snap.sessions.len());
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Read-only: the Alert message the parser takes from a terminal's screen.
+fn screen_message_check(handle: &str) {
+    let mut c = OrcaClient::new(ProcessRunner::locate());
+    match c.read_screen(handle) {
+        Ok(lines) => {
+            let msg = vibe_voice::alerts::screen_message(&lines);
+            println!("{} screen lines", lines.len());
+            match msg {
+                Some(m) => println!("message ({} bytes): {m}", m.len()),
+                None => println!("no message (the Alert would use the fallback)"),
+            }
         }
         Err(e) => {
             eprintln!("{e}");

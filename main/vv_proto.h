@@ -42,6 +42,7 @@ enum {
     VV_MSG_NOTES_STATE = 0xC0,
     VV_MSG_ALERT = 0xD0,
     VV_MSG_ALERT_CLEAR = 0xD1,
+    VV_MSG_ALERT_MORE = 0xD2,
 };
 
 // NOTES_STATE state: the Voice Notes Recording on the Mac.
@@ -129,7 +130,7 @@ typedef struct {
     uint8_t b;       // RESULT status / ACTION status / ITEM index / END count / STATE kind
     uint8_t c;       // ITEM count / STATE app / NOTES notice
     uint8_t d;       // ITEM flags
-    uint32_t u32;    // NOTES elapsed seconds
+    uint32_t u32;    // NOTES elapsed seconds / ALERT_MORE offset
     const char *text;   // ALERT: the label
     size_t text_len;
     const char *text2;  // ALERT: the message

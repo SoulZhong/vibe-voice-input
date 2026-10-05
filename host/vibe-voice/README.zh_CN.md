@@ -125,8 +125,11 @@ agent 最后说的话。按 OK 打开（跳转到该会话），按上忽略。
   `✳`；Codex 及 Orca 认识的其他 agent 使用 Orca 自己写的标题（`Codex ready`、
   `Codex - action required`）。Codex 工作时保留自己的标题，因此只有该标题能识别为工作中时 Codex 才会
   提醒。无法识别的标题从不提醒。
-- 会话从工作中变为等待时才提醒；Companion 启动时已在等待的会话、以及你正在 Orca 中看着的会话都不
-  提醒。会话重新开始工作、你在 Mac 上打开它或它被关闭时，提醒消失。
+- 会话每次从工作中变为等待时都会提醒，与 Orca 自己的通知一致（Orca 正显示的会话也会提醒）；Companion
+  启动时已在等待的会话不提醒。消息在状态变化时从该会话渲染后的屏幕读取一次（`orca terminal read --screen`）：
+  优先用 Claude Code 的 recap，否则用其最后一条回复。会话重新开始工作或关闭、或你在 Device 上打开或忽略时，
+  提醒消失。
+- `--screen-message <handle>` 打印解析器从某个终端屏幕得到的消息（只读）。
 - `--orca-list` 会打印每个会话的 agent、状态以及提醒将显示的消息。
 
 ## Voice Notes 录音

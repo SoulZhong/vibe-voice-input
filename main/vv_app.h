@@ -31,7 +31,7 @@
 #define VV_STATUS_TEXT_MAX  96
 #define VV_ALERT_MAX        8      // oldest dropped beyond this
 #define VV_ALERT_LABEL_MAX  64
-#define VV_ALERT_MSG_MAX    120
+#define VV_ALERT_MSG_MAX    364    // up to 360 bytes over ALERT + ALERT_MORE
 
 #define VV_DICTATION_LIMIT_MS   (5u * 60u * 1000u)
 // The Companion may launch Orca (up to 20 s) before it Inserts or lists.
@@ -146,6 +146,7 @@ typedef struct {
     uint8_t app;    // VV_APP_*
     char label[VV_ALERT_LABEL_MAX];
     char message[VV_ALERT_MSG_MAX];
+    uint16_t msg_rx;   // message bytes received (next ALERT_MORE offset)
 } vv_alert_t;
 
 typedef struct {
@@ -188,7 +189,7 @@ typedef struct {
     uint32_t notes_elapsed_s;     // shown
 
     // Alerts, oldest first. The card shows alerts[alert_cursor] in IDLE and
-    // RESULT; elsewhere only a count badge.
+    // RESULT (a new Alert moves it to the newest); elsewhere only a badge.
     vv_alert_t alerts[VV_ALERT_MAX];
     uint8_t alert_count;
     uint8_t alert_cursor;
@@ -224,6 +225,9 @@ const char *vv_app_target_title(const vv_app_t *app);
 // Whether the Alert card is showing (IDLE or RESULT with an Alert queued).
 // While it shows, OK click opens, UP dismisses and DOWN shows the next one.
 bool vv_app_alert_card(const vv_app_t *app);
+
+// Position of the shown Alert counted from the newest (1 = newest).
+uint8_t vv_app_alert_position(const vv_app_t *app);
 
 // Count for the top-bar badge: the queued Alerts while the card cannot show
 // (dictating, waiting, picker), else 0.

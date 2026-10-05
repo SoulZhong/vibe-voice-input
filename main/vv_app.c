@@ -247,15 +247,22 @@ uint8_t vv_app_alert_badge(const vv_app_t *app) {
     return app->alert_count;
 }
 
-static void alert_remove_at(vv_app_t *app, uint8_t i) {
+uint8_t vv_app_alert_position(const vv_app_t *app) {
+    return app->alert_count ? (uint8_t)(app->alert_count - app->alert_cursor) : 0;
+}
+
+// Remove alerts[i]. `to_newest`: show the newest remaining (after open or
+// dismiss); otherwise keep showing the same Alert.
+static void alert_remove_at(vv_app_t *app, uint8_t i, bool to_newest) {
     if (i >= app->alert_count) return;
     memmove(&app->alerts[i], &app->alerts[i + 1],
             (size_t)(app->alert_count - i - 1) * sizeof(vv_alert_t));
     app->alert_count--;
-    if (app->alert_cursor > i || app->alert_cursor >= app->alert_count) {
-        app->alert_cursor = app->alert_cursor > 0 ? (uint8_t)(app->alert_cursor - 1) : 0;
+    if (to_newest || app->alert_cursor >= app->alert_count) {
+        app->alert_cursor = app->alert_count ? (uint8_t)(app->alert_count - 1) : 0;
+    } else if (app->alert_cursor > i) {
+        app->alert_cursor--;
     }
-    if (app->alert_cursor >= app->alert_count) app->alert_cursor = 0;
     app->dirty |= VV_DIRTY_ALERTS;
 }
 
@@ -267,23 +274,39 @@ static int alert_find(const vv_app_t *app, uint8_t id) {
 }
 
 // A newer Alert for the same id replaces the old one; beyond VV_ALERT_MAX the
-// oldest is dropped. The card keeps showing the Alert it showed.
+// oldest is dropped. Every new Alert is shown (the cursor moves to it).
 static void on_alert(vv_app_t *app, const vv_msg_t *msg) {
     int old = alert_find(app, msg->a);
-    if (old >= 0) alert_remove_at(app, (uint8_t)old);
-    if (app->alert_count >= VV_ALERT_MAX) alert_remove_at(app, 0);
+    if (old >= 0) alert_remove_at(app, (uint8_t)old, true);
+    if (app->alert_count >= VV_ALERT_MAX) alert_remove_at(app, 0, true);
     vv_alert_t *a = &app->alerts[app->alert_count++];
     a->id = msg->a;
     a->app = msg->b;
     copy_text(a->label, sizeof(a->label), msg->text, msg->text_len, NULL);
     copy_text(a->message, sizeof(a->message), msg->text2, msg->text2_len, NULL);
+    a->msg_rx = (uint16_t)msg->text2_len;
+    app->alert_cursor = (uint8_t)(app->alert_count - 1);
+    app->dirty |= VV_DIRTY_ALERTS;
+}
+
+// ALERT_MORE: append the next part of a message. Parts for an unknown id or
+// at an unexpected offset (lost or reordered) are ignored.
+static void on_alert_more(vv_app_t *app, const vv_msg_t *msg) {
+    int i = alert_find(app, msg->a);
+    if (i < 0) return;
+    vv_alert_t *a = &app->alerts[i];
+    if (msg->u32 != a->msg_rx) return;
+    size_t used = strlen(a->message);
+    if (msg->text_len >= sizeof(a->message) - used) return;   // would not fit
+    copy_text(a->message + used, sizeof(a->message) - used, msg->text, msg->text_len, NULL);
+    a->msg_rx = (uint16_t)(a->msg_rx + msg->text_len);
     app->dirty |= VV_DIRTY_ALERTS;
 }
 
 static void alert_send(vv_app_t *app, uint8_t type, vv_actions_t *out) {
     vv_frame_t *f = push_frame(out);
     if (f) vv_proto_alert_id(f, type, app->alerts[app->alert_cursor].id);
-    alert_remove_at(app, app->alert_cursor);
+    alert_remove_at(app, app->alert_cursor, true);
 }
 
 // Buttons while the card shows. Returns false for presses it leaves alone.
@@ -297,9 +320,10 @@ static bool alert_button(vv_app_t *app, vv_btn_t btn, vv_press_t press, vv_actio
     case VV_BTN_UP:
         alert_send(app, VV_MSG_ALERT_DISMISS, out);
         return true;
-    case VV_BTN_DOWN:
+    case VV_BTN_DOWN:   // the next older Alert, wrapping to the newest
         if (app->alert_count > 1) {
-            app->alert_cursor = (uint8_t)((app->alert_cursor + 1) % app->alert_count);
+            app->alert_cursor = app->alert_cursor == 0 ? (uint8_t)(app->alert_count - 1)
+                                                       : (uint8_t)(app->alert_cursor - 1);
             app->dirty |= VV_DIRTY_ALERTS;
         }
         return true;
@@ -495,9 +519,12 @@ void vv_app_frame(vv_app_t *app, const vv_msg_t *msg, uint32_t now_ms, vv_action
     case VV_MSG_ALERT:
         on_alert(app, msg);
         break;
+    case VV_MSG_ALERT_MORE:
+        on_alert_more(app, msg);
+        break;
     case VV_MSG_ALERT_CLEAR: {
         int i = alert_find(app, msg->a);
-        if (i >= 0) alert_remove_at(app, (uint8_t)i);
+        if (i >= 0) alert_remove_at(app, (uint8_t)i, false);
         break;
     }
     case VV_MSG_TARGET_STATE:
