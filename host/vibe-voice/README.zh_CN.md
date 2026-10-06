@@ -77,10 +77,10 @@ runtime 下无需任何 entitlement：蓝牙和语音识别通过 Info.plist 用
 
 ## 配对
 
-1. 打开 Device 并启动 Vibe Voice；扫描名为 `VibeVoice-XXXX` 的设备时菜单栏显示 `VV ○`。
+1. 打开 Device 并启动 Vibe Voice；扫描名为 `VibeVoice-XXXX` 的设备时菜单栏显示空心的设备轮廓图标。
 2. 首次连接时 macOS 弹出配对框，输入 Device 屏幕上的 6 位配对码。输入期间 Companion
    最多重试两分钟。
-3. 菜单栏变为 `VV ●`。双方都会记住绑定；睡眠、重启或走出范围后自动重连。
+3. 菜单栏图标变为带声波条的实心设备。双方都会记住绑定；睡眠、重启或走出范围后自动重连。
 
 附近有多台设备时，可用 `VIBE_VOICE_DEVICE=VibeVoice-XXXX` 启动以固定一台。需要重新配对时，
 在“系统设置 > 蓝牙”中移除设备，并清除 Device 上的绑定。

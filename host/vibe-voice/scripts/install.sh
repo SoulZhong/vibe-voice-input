@@ -38,4 +38,4 @@ ditto "${built}" "${dest}"
 codesign --verify --strict "${dest}"
 
 open "${dest}"
-echo "installed ${dest} (launches at login; turn it off in the menu bar: VV > 开机自启动)"
+echo "installed ${dest} (launches at login; turn it off from the Vibe Voice icon in the menu bar: 开机自启动)"

@@ -95,12 +95,12 @@ therefore refuses to request Speech permission outside the app bundle.
 
 ## Pairing
 
-1. Turn on the Device and start Vibe Voice; the menu bar shows `VV ○` while it
+1. Turn on the Device and start Vibe Voice; the menu bar shows an empty Device outline while it
    scans for a Device advertising `VibeVoice-XXXX`.
 2. On first connection macOS shows a pairing prompt. Type the 6-digit passkey
    shown on the Device screen. The Companion retries for up to two minutes
    while you type.
-3. The menu bar turns to `VV ●`. The bond is remembered by both sides;
+3. The menu bar icon fills in and shows voice bars. The bond is remembered by both sides;
    reconnection after sleep, reboot or range loss is automatic.
 
 To pin one Device when several are near, start with

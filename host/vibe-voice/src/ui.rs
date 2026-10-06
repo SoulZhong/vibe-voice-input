@@ -4,12 +4,12 @@ use crate::login_macos::{self, LoginState};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
 };
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSSize, NSString};
 use std::cell::RefCell;
 
 struct Ui {
@@ -92,10 +92,9 @@ thread_local! {
 pub fn install(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    if let Some(button) = item.button(mtm) {
-        button.setTitle(&NSString::from_str("VV ○"));
-    }
+    // Menu bar space is scarce: one square template icon, no text.
+    let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSSquareStatusItemLength);
+    show_link(&item, mtm, false, "启动中");
     let menu = NSMenu::new(mtm);
     let state_row = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -153,19 +152,41 @@ pub fn set_state(text: &str) {
         };
         UI.with(|ui| {
             if let Some(ui) = ui.borrow().as_ref() {
-                let connected = text.starts_with("已连接");
-                if let Some(button) = ui.item.button(mtm) {
-                    button.setTitle(&NSString::from_str(if connected {
-                        "VV ●"
-                    } else {
-                        "VV ○"
-                    }));
-                }
+                show_link(&ui.item, mtm, text.starts_with("已连接"), &text);
                 ui.state_row
                     .setTitle(&NSString::from_str(&format!("Vibe Voice：{text}")));
             }
         });
     });
+}
+
+/// Menu bar glyphs (template images, black + alpha, drawn at 2x for an
+/// 18 pt square): the Device with voice bars when linked, an empty outline
+/// otherwise. Sources: `assets/menubar/*.svg`.
+const ICON_LINKED: &[u8] = include_bytes!("../assets/menubar/linked@2x.png");
+const ICON_UNLINKED: &[u8] = include_bytes!("../assets/menubar/unlinked@2x.png");
+
+fn show_link(item: &NSStatusItem, mtm: MainThreadMarker, connected: bool, text: &str) {
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
+    let label = format!("Vibe Voice：{text}");
+    let png = if connected {
+        ICON_LINKED
+    } else {
+        ICON_UNLINKED
+    };
+    match NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(png)) {
+        Some(image) => {
+            image.setSize(NSSize::new(18.0, 18.0));
+            image.setTemplate(true);
+            image.setAccessibilityDescription(Some(&NSString::from_str(&label)));
+            button.setImage(Some(&image));
+            button.setTitle(&NSString::from_str(""));
+        }
+        None => button.setTitle(&NSString::from_str(if connected { "●" } else { "○" })),
+    }
+    button.setToolTip(Some(&NSString::from_str(&label)));
 }
 
 /// Run the AppKit main loop (never returns).
