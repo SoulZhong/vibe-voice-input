@@ -52,6 +52,10 @@ static volatile bool s_secure;
 static volatile bool s_subscribed;
 static volatile bool s_ready;
 static volatile uint32_t s_dropped;
+// Pace: what the controller wants and what the central was last asked for
+// on this link (-1: not yet asked).
+static volatile bool s_want_fast = true;
+static volatile int s_asked_fast = -1;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 
@@ -176,6 +180,33 @@ static uint32_t random_passkey(void) {
     return value % 1000000u;
 }
 
+// Ask the central for the wanted pace. Both sets follow Apple's accessory
+// rules: max >= min + 15 ms, max * (latency + 1) <= 2 s, and a supervision
+// timeout above three times that. macOS may still pick its own values.
+static void request_pace(uint16_t conn) {
+    bool fast = s_want_fast;
+    if (conn == BLE_HS_CONN_HANDLE_NONE || !s_secure || s_asked_fast == (int)fast) return;
+    struct ble_gap_upd_params upd = {
+        // Fast: 50 AUDIO frames/s need a short interval.
+        .itvl_min = fast ? 12 : 48,     // 15 ms / 60 ms
+        .itvl_max = fast ? 24 : 72,     // 30 ms / 90 ms
+        // Slow: the central may skip up to 4 events (<= 450 ms between
+        // exchanges); the Device can still send at any event.
+        .latency = fast ? 0 : 4,
+        .supervision_timeout = 400,     // 4 s
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    int rc = ble_gap_update_params(conn, &upd);
+    if (rc == 0) {
+        s_asked_fast = fast;
+        ESP_LOGI(TAG, "asked for %s pace", fast ? "fast" : "slow");
+    } else if (rc != BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "conn param update rc=%d", rc);
+        s_asked_fast = fast;   // do not retry a request the stack rejects
+    }
+}
+
 // `final` is true after an encryption change: an insufficient link is then
 // rejected. A CCCD restore may race ahead of ENC_CHANGE, so it only upgrades.
 static void check_security(uint16_t conn, bool final) {
@@ -196,17 +227,8 @@ static void check_security(uint16_t conn, bool final) {
     if (!s_secure) {
         s_secure = true;
         emit(VV_LINK_SECURE, 0);
-        // Short interval for 50 AUDIO frames/s; macOS may pick its own.
-        struct ble_gap_upd_params upd = {
-            .itvl_min = 12,              // 15 ms
-            .itvl_max = 24,              // 30 ms
-            .latency = 0,
-            .supervision_timeout = 400,  // 4 s
-            .min_ce_len = 0,
-            .max_ce_len = 0,
-        };
-        int rc = ble_gap_update_params(conn, &upd);
-        if (rc != 0) ESP_LOGW(TAG, "conn param update rc=%d", rc);
+        s_asked_fast = -1;
+        request_pace(conn);
     }
     update_ready();
 }
@@ -220,6 +242,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             return 0;
         }
         s_conn = event->connect.conn_handle;
+        s_asked_fast = -1;
         s_secure = false;
         s_subscribed = false;
         s_ready = false;
@@ -384,6 +407,11 @@ bool vv_ble_send(const vv_frame_t *frame, uint32_t wait_ms) {
         return false;
     }
     return true;
+}
+
+void vv_ble_set_pace(bool fast) {
+    s_want_fast = fast;
+    request_pace(s_conn);
 }
 
 bool vv_ble_ready(void) {

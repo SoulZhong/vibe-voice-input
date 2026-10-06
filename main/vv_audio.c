@@ -71,13 +71,25 @@ static void stream(uint8_t dict) {
     ESP_LOGI(TAG, "Dictation %u: %u frames, %u dropped", dict, seq, (unsigned)dropped);
 }
 
+// The codec and its I2S channels sleep between Dictations: that saves the
+// codec's current and releases the I2S driver's power-management lock so the
+// chip may light-sleep. This task alone touches the codec, which serializes
+// wake, format and sleep as bsp_audio requires.
 static void worker(void *arg) {
     (void)arg;
+    if (bsp_audio_sleep() != ESP_OK) ESP_LOGW(TAG, "codec sleep failed");
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (s_run) stream(s_dict);
+        bool streamed = s_run;
+        if (streamed) {
+            if (bsp_audio_wake() != ESP_OK) ESP_LOGW(TAG, "codec wake failed");
+            stream(s_dict);
+        }
         s_level = 0;
+        // Every AUDIO frame is queued: let vv_audio_stop() return before the
+        // slower codec sleep. A new start waits for it in this task's queue.
         xSemaphoreGive(s_stopped);
+        if (streamed && bsp_audio_sleep() != ESP_OK) ESP_LOGW(TAG, "codec sleep failed");
     }
 }
 

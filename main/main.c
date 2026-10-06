@@ -8,9 +8,13 @@
 //   vv_audio                      capture + ADPCM + AUDIO frames
 //   vv_tx                         BLE notifications in FIFO order
 // The pure state machine lives in vv_app.c; see docs/vibe-voice/firmware.md.
+// Power (vv_power.c): the controller dims and darkens the screen when idle,
+// slows the BLE link, and lets the chip light-sleep only while the screen is
+// dark and nothing is busy.
 #include "vv_app.h"
 #include "vv_audio.h"
 #include "vv_ble.h"
+#include "vv_power.h"
 #include "vv_proto.h"
 #include "vv_ui.h"
 
@@ -23,6 +27,7 @@
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -56,6 +61,10 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 static vv_app_t s_app;
+static vv_power_t s_power;
+static esp_pm_lock_handle_t s_awake_lock;   // no light sleep: screen lit or busy
+static esp_pm_lock_handle_t s_cpu_lock;     // full CPU speed while capturing
+static bool s_awake_held, s_cpu_held;
 static char s_fw[48];
 static bool s_battery_ok;
 
@@ -160,6 +169,67 @@ static void handle(const ctl_event_t *ev, uint32_t now, vv_actions_t *act) {
     }
 }
 
+// Light the screen for what the user should notice: a new state (a RESULT,
+// the passkey, a lost link), a new Alert or a toast. Target updates from Mac
+// focus changes and the Voice Notes clock do not light it.
+static void note_activity(uint32_t now) {
+    static vv_state_t last_state = VV_ST_NO_LINK;
+    static uint8_t last_alerts;
+    static vv_toast_t last_toast;
+    bool seen = s_app.state != last_state || s_app.alert_count > last_alerts ||
+                (s_app.toast != VV_TOAST_NONE && s_app.toast != last_toast);
+    last_state = s_app.state;
+    last_alerts = s_app.alert_count;
+    last_toast = s_app.toast;
+    if (seen) (void)vv_power_activity(&s_power, now);
+}
+
+static void hold(esp_pm_lock_handle_t lock, bool *held, bool want) {
+    if (!lock || *held == want) return;
+    if ((want ? esp_pm_lock_acquire(lock) : esp_pm_lock_release(lock)) == ESP_OK) *held = want;
+}
+
+static void apply_power(uint32_t now) {
+    static int backlight = -1;
+    note_activity(now);
+    vv_power_update(&s_power, s_app.state, now);
+    int level = vv_power_backlight(s_power.light);
+    if (level != backlight) {
+        backlight = level;
+        bsp_display_backlight((uint8_t)level);
+        ESP_LOGI(TAG, "backlight %d%%", level);
+    }
+    // LEDC dimming, LCD flushes and the button-to-UI path need the clocks.
+    hold(s_awake_lock, &s_awake_held,
+         s_power.light != VV_LIGHT_OFF || vv_power_busy(s_app.state));
+    hold(s_cpu_lock, &s_cpu_held,
+         s_app.state == VV_ST_DICTATING || s_app.state == VV_ST_WAITING);
+    vv_ble_set_pace(s_power.pace == VV_PACE_FAST);
+}
+
+// Dynamic frequency scaling, plus automatic light sleep whenever no lock
+// forbids it. BLE keeps time on the main crystal during light sleep (the
+// board has no 32 kHz crystal); USB stays awake while a host is attached.
+static void power_init(void) {
+    esp_pm_config_t pm = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = true,
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "power management unavailable: %s", esp_err_to_name(err));
+        return;
+    }
+    if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "vv_awake", &s_awake_lock) != ESP_OK ||
+        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "vv_cpu", &s_cpu_lock) != ESP_OK) {
+        ESP_LOGW(TAG, "power locks unavailable");
+        return;
+    }
+    // Stay awake through startup; the controller decides from then on.
+    hold(s_awake_lock, &s_awake_held, true);
+}
+
 static void controller_task(void *arg) {
     (void)arg;
     static ctl_event_t ev;
@@ -173,8 +243,13 @@ static void controller_task(void *arg) {
     for (;;) {
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
             uint32_t now = now_ms();
-            handle(&ev, now, &act);
-            execute(&act);
+            // A press on a dark screen only lights it: the user cannot see
+            // what OK or DOWN would do.
+            bool wake_only = ev.kind == CTL_BUTTON && vv_power_activity(&s_power, now);
+            if (!wake_only) {
+                handle(&ev, now, &act);
+                execute(&act);
+            }
             if (ev.kind == CTL_LINK && ev.a == VV_LINK_DISCONNECTED) {
                 ESP_LOGI(TAG, "BLE frames dropped so far: %u", (unsigned)vv_ble_dropped());
             }
@@ -195,6 +270,8 @@ static void controller_task(void *arg) {
                 battery_dirty = true;
             }
         }
+
+        apply_power(now);
 
         pending_dirty |= vv_app_take_dirty(&s_app);
         bool meter = ticked && s_app.state == VV_ST_DICTATING;
@@ -229,7 +306,9 @@ void app_main(void) {
                  BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
         return;
     }
-    bsp_display_backlight(90);
+    power_init();
+    vv_power_init(&s_power, now_ms());
+    bsp_display_backlight(vv_power_backlight(VV_LIGHT_ON));
 
     s_queue = xQueueCreate(CTL_QUEUE_DEPTH, sizeof(ctl_event_t));
     if (!s_queue) {

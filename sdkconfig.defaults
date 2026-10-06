@@ -65,3 +65,16 @@ CONFIG_BT_NIMBLE_MAX_BONDS=3
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 # 每秒 50 个 AUDIO 通知，多留几块 mbuf 吸收连接事件间的突发。
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+
+# Power (main/vv_power.c, main.c power_init): dynamic frequency scaling and
+# automatic light sleep while the screen is dark. The board has no 32 kHz
+# crystal (GPIO0/1 carry the buttons and LCD CS), so BLE keeps time on the
+# main crystal, which stays powered in light sleep. USB-Serial-JTAG keeps the
+# chip awake while a host is attached so logs and flashing keep working.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y

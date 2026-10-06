@@ -21,6 +21,7 @@ longer compiles them into the firmware.
 | `main/vv_proto.c` | Frame encoders (Device → Companion) and decoder (Companion → Device) | No (host tested) |
 | `main/vv_adpcm.c` | IMA-ADPCM encoder/decoder, matches `tests/vectors/adpcm_golden.txt` | No (host tested) |
 | `main/vv_text.c` | UTF-8 tail cut, sanitizing, wrap estimate, time/passkey formatting | No (host tested) |
+| `main/vv_power.c` | When to light, dim and darken the screen and which BLE pace to ask for | No (host tested) |
 | `main/vv_strings.h` | Every fixed Chinese UI string | No |
 | `assets/icons/vibe-voice/vv_icons.c` | Supported App logos, 96 px and 20 px (generated, [README](../../assets/icons/vibe-voice/README.md)) | LVGL data only |
 | `main/vv_ble.c` | NimBLE peripheral, security, advertising, FIFO TX task | Yes |
@@ -167,7 +168,7 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   HELLO, repeating it every second until HELLO_ACK moves to Idle. If the Companion turns
   notifications off and on again on a live link, the Device starts over with a
   new HELLO.
-- Throughput: the Device requests a 15–30 ms connection interval and 251-byte
+- Throughput: the Device requests a fast pace (see Power) and 251-byte
   data length; the preferred ATT MTU is 247 (an AUDIO frame is 167 bytes and
   needs an MTU of at least 170). One TX task notifies frames in FIFO order from a
   12-frame queue and backs off while the controller is out of buffers. The audio
@@ -182,7 +183,33 @@ chunk is IMA-ADPCM encoded (low nibble first) with the encoder state before the
 chunk in the frame header. Only one chunk is buffered; nothing accumulates a
 whole recording. Mic gain stays at the BSP's 30 dB. `CONFIG_I2S_ISR_IRAM_SAFE=y`
 keeps the I2S interrupt running during Flash writes; the firmware writes NVS
-only while pairing, never during a Dictation.
+only while pairing, never during a Dictation. Between Dictations the ES8311 and
+its I2S channels sleep (`bsp_audio_sleep()`); the audio task wakes them when a
+Dictation starts, which adds a few milliseconds before the first frame.
+
+## Power
+
+`vv_power.c` decides; the controller task in `main.c` applies it every loop.
+
+- Screen: lit at 90 % on activity, dimmed to 15 % after 15 s and dark after
+  60 s without activity. Activity is a button press, a new state (a RESULT,
+  the passkey, a lost link), a new Alert or a toast. Target updates from Mac
+  focus changes and the Voice Notes clock do not light it. Dictating, waiting
+  for a RESULT, the picker, pairing and linking keep it lit. A press on a dark
+  screen only lights it and does nothing else; a press on a dimmed screen acts
+  normally.
+- BLE pace: fast (15–30 ms interval, latency 0) while busy and for 10 s after
+  activity; slow (60–90 ms, peripheral latency 4) otherwise. Both sets follow
+  Apple's accessory rules. In the slow pace the Device can still send at any
+  connection event, so button presses stay prompt; Companion frames such as
+  Alerts may arrive up to about 0.5 s later. macOS may choose other values.
+- Chip: dynamic frequency scaling (40–160 MHz, held at 160 MHz while
+  dictating or waiting) and automatic light sleep, allowed only while the
+  screen is dark and nothing is busy (LEDC dimming and LCD flushes need the
+  clocks). BLE keeps time on the main crystal in light sleep because the board
+  has no 32 kHz crystal. While a USB host is attached the chip does not
+  light-sleep, so logs and flashing keep working; measure battery life on
+  battery.
 
 ## Chinese text and fonts
 
@@ -277,3 +304,9 @@ Flash and observe with the serial log. Report the firmware hash with results.
     appears after the result. A session that starts working again drops its
     Alert; a turn that ends while Orca shows that session still alerts, like
     Orca's own notification.
+19. Power, on battery (USB unplugged): idle 15 s dims, 60 s darkens; the first
+    press on a dark screen only lights it; a new Alert or a RESULT lights it;
+    a Mac focus change does not. After dark, OK starts a Dictation within one
+    press of waking, with no lost words at the start; Submit, Undo and Alerts
+    still work after minutes of slow pace. Compare the battery percentage
+    after an hour idle with the previous firmware.

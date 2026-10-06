@@ -44,6 +44,9 @@ run_static_checks() {
         tests/test_vv_app.c main/vv_app.c main/vv_proto.c main/vv_text.c \
         -o "${test_dir}/test_vv_app"
     "${test_dir}/test_vv_app"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_vv_power.c main/vv_power.c -o "${test_dir}/test_vv_power"
+    "${test_dir}/test_vv_power"
     python3 tools/vibe_fonts.py check
     python3 tools/vibe_icons.py check
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \

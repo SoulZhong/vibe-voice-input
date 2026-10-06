@@ -36,3 +36,10 @@ bool vv_ble_send(const vv_frame_t *frame, uint32_t wait_ms);
 
 // Frames dropped because the queue was full or the stack ran out of buffers.
 uint32_t vv_ble_dropped(void);
+
+// Connection pace: fast (15-30 ms interval) for Dictation and quick follow-up
+// presses, slow (60-90 ms, peripheral latency 4) when idle. Call it whenever
+// the wanted pace may have changed (controller task): it asks the central
+// only when the pace differs from the last accepted request, retrying a
+// request that could not be sent yet.
+void vv_ble_set_pace(bool fast);
