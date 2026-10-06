@@ -14,6 +14,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
+/// A healthy write with response completes within one or two connection
+/// intervals; far longer means the link is gone.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Link events delivered to the Companion.
 #[derive(Debug)]
 pub enum LinkEvent {
@@ -185,9 +189,18 @@ async fn run_session(
                 debug_assert!(frame.len() <= MAX_FRAME);
                 // PARTIAL is superseded by the next one; everything else must land.
                 let kind = if frame.first() == Some(&ty::PARTIAL) { WriteType::WithoutResponse } else { WriteType::WithResponse };
-                if let Err(e) = p.write(&rx, &frame, kind).await {
-                    log::warn!("write failed: {e}");
-                    if !p.is_connected().await.unwrap_or(false) {
+                // A write to a link macOS silently replaced never completes, and
+                // this loop would then stop reading the Device's frames too.
+                match timeout(WRITE_TIMEOUT, p.write(&rx, &frame, kind)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        log::warn!("write failed: {e}");
+                        if !p.is_connected().await.unwrap_or(false) {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("write timed out; reconnecting");
                         break;
                     }
                 }
@@ -198,7 +211,7 @@ async fn run_session(
                 }
             }
             _ = check.tick() => {
-                if !p.is_connected().await.unwrap_or(false) {
+                if !timeout(WRITE_TIMEOUT, p.is_connected()).await.ok().and_then(Result::ok).unwrap_or(false) {
                     break;
                 }
             }

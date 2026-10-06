@@ -489,6 +489,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
     }
 
     fn on_dict_start(&mut self, dict: u8, now: Instant) {
+        log::info!("dictation {dict} started");
         if let Some(old) = self.dictation.take() {
             log::warn!("dictation {} replaced by {dict}", old.id);
             self.recognizer.cancel();
@@ -557,6 +558,7 @@ impl<I: Injector, R: Recognizer, O: OrcaApi> Companion<I, R, O> {
     }
 
     fn on_dict_cancel(&mut self, dict: u8) {
+        log::info!("dictation {dict} cancelled");
         if self.dictation.as_ref().is_some_and(|d| d.id == dict) {
             self.dictation = None;
             self.recognizer.cancel();
