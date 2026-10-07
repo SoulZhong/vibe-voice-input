@@ -7,7 +7,7 @@ The contract between the **Device** (AI Passport firmware in `main/`) and the
 
 The Companion now lives in [Voice Notes](https://github.com/SoulZhong/voice-notes)
 (macOS and Windows, `src-tauri/vibe-device/src/protocol.rs`); the standalone
-macOS app in `host/vibe-voice/` is no longer maintained. This document stays
+macOS app that used to live in `host/vibe-voice/` was removed. This document stays
 the only standard: to change the protocol, edit this document and bump the
 version first, then ask Voice Notes to follow. Avoid bumping the version when
 you can, because Devices are flashed by hand. On a mismatch Voice Notes tells

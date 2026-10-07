@@ -4,7 +4,7 @@
 
 **设备**（`main/` 中的 AI Passport 固件）与**配套程序**之间的约定。术语见 [`CONTEXT.zh_CN.md`](CONTEXT.zh_CN.md)。
 
-配套程序现已并入 [Voice Notes](https://github.com/SoulZhong/voice-notes)（macOS 与 Windows，代码在 `src-tauri/vibe-device/src/protocol.rs`）；`host/vibe-voice/` 中的独立 macOS 程序不再维护。本文仍是唯一标准：改协议时先改本文并升版本号，再通知 Voice Notes 跟进。能不升版就不升版，因为设备需要人工刷机。版本不一致时，Voice Notes 会提示用户该刷固件还是该升级 Voice Notes。
+配套程序现已并入 [Voice Notes](https://github.com/SoulZhong/voice-notes)（macOS 与 Windows，代码在 `src-tauri/vibe-device/src/protocol.rs`）；原来位于 `host/vibe-voice/` 的独立 macOS 程序已删除。本文仍是唯一标准：改协议时先改本文并升版本号，再通知 Voice Notes 跟进。能不升版就不升版，因为设备需要人工刷机。版本不一致时，Voice Notes 会提示用户该刷固件还是该升级 Voice Notes。
 
 第 2 版用“保存且跟随焦点的目标”和“跳转”选择页取代了 v1 的可配置目标列表：TARGETS_REQ 的列表编号、TARGET_ITEM 的 flags 和 TARGET_STATE 的格式都已变化。v1 的对端会看到版本不一致。
 

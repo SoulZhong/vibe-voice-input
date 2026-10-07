@@ -11,7 +11,7 @@ The AI Passport worn by the user. It captures speech, shows status and live text
 _Avoid_: board, hardware, client
 
 **Companion**:
-The macOS app that pairs with the Device, recognizes speech, and acts on the **Target**.
+The computer app that pairs with the Device, recognizes speech, and acts on the **Target**: the device features of Voice Notes (macOS and Windows).
 _Avoid_: host, server, daemon, helper
 
 **Supported App**:

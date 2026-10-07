@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
-  <defs><mask id="m"><rect width="18" height="18" fill="#fff"/>
-    <g fill="#000"><rect x="5.9" y="7.25" width="1.5" height="3.5" rx="0.75"/><rect x="8.25" y="5" width="1.5" height="8" rx="0.75"/><rect x="10.6" y="6.5" width="1.5" height="5" rx="0.75"/></g>
-  </mask></defs>
-  <rect x="3.5" y="1.5" width="11" height="15" rx="3" fill="#000" mask="url(#m)"/>
-</svg>
