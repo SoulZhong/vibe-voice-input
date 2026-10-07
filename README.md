@@ -75,9 +75,10 @@ drives Voice Notes over its local control socket. Details are in the
    Or build it yourself (ESP-IDF 5.5.3 activated): `./tools/validate.sh`, then
    flash `build/vibe-voice-input-full.bin`. Flashing the merged image resets
    stored pairing data.
-2. **Install the Companion**: download `VibeVoice-<version>-macos-universal.zip`
-   from [Releases](https://github.com/SoulZhong/vibe-voice-input/releases), unzip, move `VibeVoice.app` to Applications and open
-   it (or build and install from source: `cd host/vibe-voice && ./scripts/install.sh`).
+2. **Install the Companion** (Apple silicon Mac): download
+   `VibeVoice-<version>-macos-arm64.dmg` from [Releases](https://github.com/SoulZhong/vibe-voice-input/releases), open it, drag
+   `VibeVoice` onto Applications and open it (or build and install from source,
+   also on Intel: `cd host/vibe-voice && ./scripts/install.sh`).
    It starts automatically at login from then on. Grant Bluetooth, Speech
    Recognition and Accessibility when asked.
 3. **Pair**: the device shows a 6-digit passkey; type it into the macOS prompt.

@@ -16,8 +16,8 @@ Vibe Voice 语音输入的 **Companion**：通过低功耗蓝牙与 AI Passport�
 
 ## 安装
 
-- **下载**：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 获取 `VibeVoice-<版本>-macos-universal.zip`（支持 Apple Silicon 与
-  Intel，Developer ID 签名并已公证），解压后把 `VibeVoice.app` 移到 `/Applications` 并打开。
+- **下载**（Apple 芯片 Mac）：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 获取 `VibeVoice-<版本>-macos-arm64.dmg`（Developer ID
+  签名并已公证），打开后把 `VibeVoice` 拖到“应用程序”并打开。Intel Mac 请从源码构建。
 - **从源码安装**：`./scripts/install.sh` 会构建应用、退出正在运行的旧版本、安装到
   `/Applications/VibeVoice.app`（`/Applications` 不可写时为 `~/Applications`）并启动它。再次运行即可
   更新；设置 `VV_SIGN_IDENTITY` 可在更新后保留辅助功能授权。
@@ -50,8 +50,8 @@ VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh --dry-run v0
 VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh v0.1.0
 ```
 
-在干净的工作区中，`release.sh` 通过完整门禁构建固件，构建通用、hardened、Developer ID 签名的应用并
-打包，公证并装订（`NOTARY_PROFILE`，默认 `voice-notes-notary`），用 `spctl` 检查，在
+在干净的工作区中，`release.sh` 通过完整门禁构建固件，构建 Apple 芯片、hardened、Developer ID 签名的应用，
+连同“应用程序”快捷方式打包成签名的 DMG，对 DMG 公证并装订（`NOTARY_PROFILE`，默认 `voice-notes-notary`），用 `spctl` 检查，在
 `build/release/<版本>/` 下写出 `SHA256SUMS.txt` 和发布说明，打并推送 `<版本>` 标签，再用 `gh` 创建
 GitHub Release。每个外部步骤执行前都会先打印；`--dry-run` 跳过公证、打标签、推送和上传。hardened
 runtime 下无需任何 entitlement：蓝牙和语音识别通过 Info.plist 用途说明授权，辅助功能是 TCC 授权，

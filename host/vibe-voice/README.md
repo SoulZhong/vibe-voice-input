@@ -19,9 +19,10 @@ the wire format is [`docs/vibe-voice/protocol.md`](../../docs/vibe-voice/protoco
 
 ## Install
 
-- **Download**: get `VibeVoice-<version>-macos-universal.zip` from
-  [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) (Apple Silicon and Intel, Developer ID signed and
-  notarized), unzip, move `VibeVoice.app` to `/Applications` and open it.
+- **Download** (Apple silicon Macs): get `VibeVoice-<version>-macos-arm64.dmg`
+  from [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) (Developer ID signed and notarized), open
+  it, drag `VibeVoice` onto Applications and open it. On an Intel Mac, build from
+  source.
 - **From source**: `./scripts/install.sh` builds the app, quits a running copy,
   installs it to `/Applications/VibeVoice.app` (or `~/Applications` when
   `/Applications` is not writable), and starts it. Run it again to update; pass
@@ -60,9 +61,9 @@ VV_SIGN_IDENTITY="Developer ID Application: …" scripts/release.sh v0.1.0
 ```
 
 From a clean tree, `release.sh` builds the firmware through the full gate,
-builds the universal, hardened, Developer ID signed app, zips it, notarizes and
-staples it (`NOTARY_PROFILE`, default `voice-notes-notary`), checks it with
-`spctl`, writes `SHA256SUMS.txt` and release notes under `build/release/<version>/`,
+builds the Apple silicon, hardened, Developer ID signed app, packs it into a
+signed DMG beside an Applications link, notarizes and staples the DMG
+(`NOTARY_PROFILE`, default `voice-notes-notary`), checks it with `spctl`, writes `SHA256SUMS.txt` and release notes under `build/release/<version>/`,
 tags and pushes `<version>`, and creates the GitHub Release with `gh`. Every
 external step is printed first; `--dry-run` skips notarization, the tag, the
 push and the upload. No entitlements are needed under the hardened runtime:
