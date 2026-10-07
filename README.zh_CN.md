@@ -46,7 +46,7 @@ flowchart LR
 ## 快速开始
 
 1. **刷写固件**：从 [Releases](https://github.com/SoulZhong/vibe-voice-input/releases) 下载 `vibe-voice-input-<版本>-full.bin`，写到 `0x0`（`esptool.py --chip esp32c3 write_flash 0x0 vibe-voice-input-<版本>-full.bin`）。也可自行构建（已激活 ESP-IDF 5.5.3）：运行 `./tools/validate.sh`，再刷写 `build/vibe-voice-input-full.bin`。刷写合并镜像会清除已保存的配对信息。
-2. **在电脑上安装 [Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest)**（macOS Apple 芯片，或 Windows x64），打开后按提示授予权限。
+2. **在电脑上安装 Voice Notes**（macOS Apple 芯片，或 Windows x64）：从 [Voice Notes Release](https://github.com/SoulZhong/voice-notes/releases/latest) 下载，打开后按提示授予权限。
 3. **配对**：设备显示 6 位配对码。macOS 在系统弹窗中输入，Windows 在 Voice Notes 里输入。
 
 独立的 macOS VibeVoice 程序已不再维护，使用 Voice Notes 前请先退出并删除它。

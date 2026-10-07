@@ -264,8 +264,8 @@ From a clean tree with ESP-IDF activated and `gh` logged in, the script tags
 `HEAD` (so the firmware reports exactly the version), builds through the
 firmware gate, writes `SHA256SUMS.txt` and bilingual notes under
 `build/release/<version>/`, pushes the tag and creates the GitHub Release with
-the merged image. The notes link
-[Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest), which
+the merged image. The notes link the Voice Notes download page,
+[Voice Notes Release](https://github.com/SoulZhong/voice-notes/releases/latest); Voice Notes
 is the computer side. If the protocol version changed, say in the notes which
 Voice Notes version is needed.
 

@@ -202,7 +202,7 @@ Voice Notes，听写继续。两次按下间隔超过该窗口则算两次单击
 ./tools/release_firmware.sh v0.2.0
 ```
 
-在干净的工作区、已激活 ESP-IDF、`gh` 已登录的情况下，脚本先给 `HEAD` 打标签（让固件报告的版本号正好是该版本），通过固件门禁构建，在 `build/release/<版本>/` 下生成 `SHA256SUMS.txt` 和中英双语说明，然后推送标签并创建带合并镜像的 GitHub Release。说明里附 [Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest) 的下载地址，它就是电脑端。协议版本有变化时，在说明里写明需要哪个版本的 Voice Notes。
+在干净的工作区、已激活 ESP-IDF、`gh` 已登录的情况下，脚本先给 `HEAD` 打标签（让固件报告的版本号正好是该版本），通过固件门禁构建，在 `build/release/<版本>/` 下生成 `SHA256SUMS.txt` 和中英双语说明，然后推送标签并创建带合并镜像的 GitHub Release。说明里附 Voice Notes 的下载地址 [Voice Notes Release](https://github.com/SoulZhong/voice-notes/releases/latest)，Voice Notes 就是电脑端。协议版本有变化时，在说明里写明需要哪个版本的 Voice Notes。
 
 ## 上机验收清单
 

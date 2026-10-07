@@ -89,14 +89,14 @@ cat >"${notes}" <<EOF
 
 ### Computer side
 
-Install [Voice Notes](${voice_notes}) (macOS on Apple silicon, Windows x64).
-It connects to the Device, recognizes speech and inserts the text. On macOS
+Install Voice Notes from [Voice Notes Release](${voice_notes})
+(macOS on Apple silicon, Windows x64). It connects to the Device, recognizes speech and inserts the text. On macOS
 type the 6-digit passkey from the Device screen into the system pairing prompt;
 on Windows type it into Voice Notes.
 
 ### 电脑端
 
-请安装 [Voice Notes](${voice_notes})（macOS Apple 芯片、Windows x64），由它连接设备、识别语音并插入文字。
+请从 [Voice Notes Release](${voice_notes}) 下载安装 Voice Notes（macOS Apple 芯片、Windows x64），由它连接设备、识别语音并插入文字。
 配对时，macOS 在系统弹框里输入设备屏幕上的 6 位配对码，Windows 在 Voice Notes 里输入。
 EOF
 echo "notes: ${notes}"

@@ -70,9 +70,10 @@ computer's focus to update the Target. Details are in the
    Or build it yourself (ESP-IDF 5.5.3 activated): `./tools/validate.sh`, then
    flash `build/vibe-voice-input-full.bin`. Flashing the merged image resets
    stored pairing data.
-2. **Install [Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest)** on the computer
-   (macOS on Apple silicon, or Windows x64), open it and grant the permissions
-   it asks for.
+2. **Install Voice Notes** on the computer (macOS on Apple silicon, or Windows
+   x64): download it from
+   [Voice Notes Release](https://github.com/SoulZhong/voice-notes/releases/latest),
+   open it and grant the permissions it asks for.
 3. **Pair**: the device shows a 6-digit passkey. On macOS type it into the
    system prompt; on Windows type it into Voice Notes.
 
