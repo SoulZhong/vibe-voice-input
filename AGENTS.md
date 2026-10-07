@@ -43,6 +43,7 @@ retain the separate authorization requirements for flashing, Git writes, and pub
 - Button callbacks must stay non-blocking. Audio, storage, networking, and other slow operations belong in worker tasks.
 - A demo must stop every task, timer, callback, and event handler that can access its UI before deleting the screen.
 - Keep testable state machines, protocols, timing, and layout calculations independent from ESP-IDF/LVGL and cover them with host tests.
+- Vibe Voice: the computer side lives in [Voice Notes](https://github.com/SoulZhong/voice-notes); [`docs/vibe-voice/protocol.md`](docs/vibe-voice/protocol.md) is the only protocol standard (change it and bump the version before asking Voice Notes to follow). Keep the `VibeVoice-` name prefix, the Nordic UART Service, and the on-screen 6-digit passkey. Firmware release notes link https://github.com/SoulZhong/voice-notes/releases/latest.
 - Never commit credentials, device QR secrets, private keys, personal data, or unsanitized logs.
 - Every maintained Markdown document uses English at its default `.md` path and Simplified Chinese in a paired `.zh_CN.md` file. Keep both versions aligned and retain reciprocal language links.
 

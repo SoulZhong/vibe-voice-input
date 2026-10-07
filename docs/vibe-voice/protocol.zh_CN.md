@@ -2,7 +2,9 @@
 
 # Vibe Voice BLE 协议（v2）
 
-**设备**（`main/` 中的 AI Passport 固件）与**配套程序**（`host/vibe-voice/` 中的 macOS 应用）之间的约定。术语见 [`CONTEXT.zh_CN.md`](CONTEXT.zh_CN.md)。
+**设备**（`main/` 中的 AI Passport 固件）与**配套程序**之间的约定。术语见 [`CONTEXT.zh_CN.md`](CONTEXT.zh_CN.md)。
+
+配套程序现已并入 [Voice Notes](https://github.com/SoulZhong/voice-notes)（macOS 与 Windows，代码在 `src-tauri/vibe-device/src/protocol.rs`）；`host/vibe-voice/` 中的独立 macOS 程序不再维护。本文仍是唯一标准：改协议时先改本文并升版本号，再通知 Voice Notes 跟进。能不升版就不升版，因为设备需要人工刷机。版本不一致时，Voice Notes 会提示用户该刷固件还是该升级 Voice Notes。
 
 第 2 版用“保存且跟随焦点的目标”和“跳转”选择页取代了 v1 的可配置目标列表：TARGETS_REQ 的列表编号、TARGET_ITEM 的 flags 和 TARGET_STATE 的格式都已变化。v1 的对端会看到版本不一致。
 
@@ -13,7 +15,7 @@
   - RX `6e400002-…` 写 / 无响应写：配套程序 → 设备
   - TX `6e400003-…` 通知：设备 → 配套程序
 - 广播名：`VibeVoice-XXXX`（MAC 末两字节，大写十六进制）。
-- 安全：LE Secure Connections、绑定、MITM。设备 IO 能力为 DisplayOnly，屏幕显示 6 位配对码，由用户在 macOS 输入。RX、TX 及 TX CCCD 都要求加密链路。绑定信息存于 NVS。
+- 安全：LE Secure Connections、绑定、MITM。设备 IO 能力为 DisplayOnly，屏幕显示 6 位配对码，用户在 macOS 的配对弹框或 Windows 上的 Voice Notes 里输入。RX、TX 及 TX CCCD 都要求加密链路。绑定信息存于 NVS。
 - 每次 GATT 写或通知承载一个协议帧，每帧最多 **180 字节**。不分片；长文本只发送**尾部**，在 UTF-8 字符边界截断。
 - 整数为小端序。文本为不带结束符的 UTF-8，长度即帧剩余部分。
 

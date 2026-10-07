@@ -3,8 +3,15 @@
 # Vibe Voice BLE protocol (v2)
 
 The contract between the **Device** (AI Passport firmware in `main/`) and the
-**Companion** (macOS app in `host/vibe-voice/`). Terms follow
-[`CONTEXT.md`](CONTEXT.md).
+**Companion**. Terms follow [`CONTEXT.md`](CONTEXT.md).
+
+The Companion now lives in [Voice Notes](https://github.com/SoulZhong/voice-notes)
+(macOS and Windows, `src-tauri/vibe-device/src/protocol.rs`); the standalone
+macOS app in `host/vibe-voice/` is no longer maintained. This document stays
+the only standard: to change the protocol, edit this document and bump the
+version first, then ask Voice Notes to follow. Avoid bumping the version when
+you can, because Devices are flashed by hand. On a mismatch Voice Notes tells
+the user whether to flash the Device or update Voice Notes.
 
 Version 2 replaced v1's configurable Target list with the stored, focus-following
 Target and the Jump picker: TARGETS_REQ list ids, TARGET_ITEM flags and the
@@ -18,7 +25,8 @@ TARGET_STATE layout changed. A v1 peer sees a version mismatch.
   - TX `6e400003-…` notify: Device → Companion
 - Advertised name: `VibeVoice-XXXX` (last two MAC bytes, uppercase hex).
 - Security: LE Secure Connections, bonding, MITM. The Device has DisplayOnly IO
-  capability and shows a 6-digit passkey; macOS asks the user to type it. RX, TX
+  capability and shows a 6-digit passkey; the user types it in the macOS
+  pairing prompt, or in Voice Notes on Windows. RX, TX
   and the TX CCCD require an encrypted link. Bonds are stored in NVS.
 - One protocol frame per GATT write or notification. Every frame is at most
   **180 bytes** (fits the ATT MTU macOS negotiates). There is no fragmentation;

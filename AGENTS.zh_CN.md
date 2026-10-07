@@ -38,6 +38,7 @@
 - 按键回调不得阻塞。音频、存储、网络等慢操作必须放入工作任务。
 - demo 删除 screen 前，必须停止所有可能访问其 UI 的任务、定时器、回调和事件处理器。
 - 可测试的状态机、协议、计时和布局计算应与 ESP-IDF/LVGL 解耦，并由 host tests 覆盖。
+- Vibe Voice：电脑端在 [Voice Notes](https://github.com/SoulZhong/voice-notes) 中；[`docs/vibe-voice/protocol.zh_CN.md`](docs/vibe-voice/protocol.zh_CN.md) 是唯一协议标准（先改文档并升版本号，再通知 Voice Notes 跟进）。保持广播名前缀 `VibeVoice-`、Nordic UART 服务和屏幕上的 6 位配对码。固件发布说明附 https://github.com/SoulZhong/voice-notes/releases/latest。
 - 禁止提交凭证、设备二维码秘密、私钥、个人数据或未脱敏日志。
 - 所有维护中的 Markdown 默认 `.md` 路径必须为英文，简体中文使用配对的 `.zh_CN.md` 文件。两种语言必须保持一致并保留互相切换链接。
 
