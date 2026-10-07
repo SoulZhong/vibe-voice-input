@@ -47,9 +47,9 @@ LVGL 任务（优先级 4）只负责渲染。
 
 | 状态 | 界面 |
 | --- | --- |
-| 未连接（广播中） | 灰色同心圆，标题 `未连接`，`在 Mac 上打开 Vibe Voice 并连接`，底部 `设备名 VibeVoice-XXXX` |
-| 配对 | 标题 `配对码`，48 px 蓝色 6 位配对码（`482 913`），`在 Mac 上输入此配对码`，设备名 |
-| 连接中 | 蓝色转圈，`正在连接`，`等待 Mac 端响应…`（链路已加密，已发 HELLO，等待 HELLO_ACK） |
+| 未连接（广播中） | 灰色同心圆，标题 `未连接`，`在电脑上打开 Voice Notes 并连接`，底部 `设备名 VibeVoice-XXXX` |
+| 配对 | 标题 `配对码`，48 px 蓝色 6 位配对码（`482 913`），`在电脑上输入此配对码`，设备名 |
+| 连接中 | 蓝色转圈，`正在连接`，`等待电脑端响应…`（链路已加密，已发 HELLO，等待 HELLO_ACK） |
 | 空闲 | 目标所在应用的 96 px 图标（目标不可用时半透明），下方为会话标题（标签中 `" · "` 之后的部分）；应用未知时为薄荷绿圆环加实心圆点和 `就绪`。副标题 `按 OK 开始说话`，或以琥珀色显示最重要的问题：协议版本不兼容、Companion 的 STATUS（语音识别权限、辅助功能权限、Orca CLI、中文识别器，未知代码则显示 Companion 给的文字），或 `目标未运行` |
 | 听写中 | 珊瑚红圆点 + `听写中`，`MM:SS` 计时（最后 30 秒变琥珀色），16 根实时麦克风电平条，最新临时文本最多折成 6 行，放不下时显示尾部并以 `…` 开头 |
 | 等待结果 | 薄荷绿转圈，`识别中…`，临时文本最后两行 |
@@ -122,7 +122,7 @@ Voice Notes，听写继续。两次按下间隔超过该窗口则算两次单击
   BLE 工具查看），读和 CCCD 写都要求加密且已认证的链路。两个特征都有 `access_cb`。
 - 安全：只用 LE Secure Connections（`CONFIG_BT_NIMBLE_SM_LEGACY=n`、`SM_SC_ONLY`），
   MITM，绑定，DisplayOnly IO 能力。连接后设备主动请求安全。新 Mac 配对时，设备生成无
-  偏的随机 6 位配对码并显示，用户在 Mac 上输入。若链路最终未加密、未认证、未绑定或密钥
+  偏的随机 6 位配对码并显示，用户在 macOS 的配对弹框或 Windows 上的 Voice Notes 里输入。若链路最终未加密、未认证、未绑定或密钥
   短于 16 字节，设备断开连接并提示 `配对失败，请重试`。
 - 绑定保存在 NVS（`CONFIG_BT_NIMBLE_NVS_PERSIST=y`，最多 3 个）。已绑定的 Mac 重连
   无需配对码。若 Mac 忘记了设备，设备删除旧绑定并重新配对（`REPEAT_PAIRING`）。若设备
@@ -194,6 +194,15 @@ Voice Notes，听写继续。两次按下间隔超过该窗口则算两次单击
 ./tools/validate.sh --static    # 主机测试：vv_adpcm（黄金向量）、vv_proto/vv_text、vv_app、字库覆盖
 ./tools/validate.sh --firmware  # ESP-IDF 构建 + 合并镜像 build/vibe-voice-input-full.bin
 ```
+
+## 发布
+
+```bash
+./tools/release_firmware.sh --dry-run v0.2.0   # 只构建并生成说明
+./tools/release_firmware.sh v0.2.0
+```
+
+在干净的工作区、已激活 ESP-IDF、`gh` 已登录的情况下，脚本先给 `HEAD` 打标签（让固件报告的版本号正好是该版本），通过固件门禁构建，在 `build/release/<版本>/` 下生成 `SHA256SUMS.txt` 和中英双语说明，然后推送标签并创建带合并镜像的 GitHub Release。说明里附 [Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest) 的下载地址，它就是电脑端。协议版本有变化时，在说明里写明需要哪个版本的 Voice Notes。
 
 ## 上机验收清单
 

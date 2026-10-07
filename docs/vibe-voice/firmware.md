@@ -57,9 +57,9 @@ control hints, or a toast that temporarily replaces them.
 
 | State | Screen |
 | --- | --- |
-| No link (advertising) | Grey concentric rings, title `VV_H_NO_LINK` ("not connected"), `VV_T_NO_LINK_HINT` ("open Vibe Voice on the Mac and connect"), bottom line with the device name `VibeVoice-XXXX` |
-| Pairing | Title `VV_H_PAIRING` ("passkey"), the 6-digit passkey in 48 px blue digits (`482 913`), `VV_T_PAIRING_HINT` ("type this on the Mac"), device name |
-| Linking | Blue spinner, `VV_H_LINKING` ("connecting"), `VV_T_LINKING_HINT` ("waiting for the Mac"): secure link, HELLO sent, waiting for HELLO_ACK |
+| No link (advertising) | Grey concentric rings, title `VV_H_NO_LINK` ("not connected"), `VV_T_NO_LINK_HINT` ("open Voice Notes on the computer and connect"), bottom line with the device name `VibeVoice-XXXX` |
+| Pairing | Title `VV_H_PAIRING` ("passkey"), the 6-digit passkey in 48 px blue digits (`482 913`), `VV_T_PAIRING_HINT` ("type this on the computer"), device name |
+| Linking | Blue spinner, `VV_H_LINKING` ("connecting"), `VV_T_LINKING_HINT` ("waiting for the computer"): secure link, HELLO sent, waiting for HELLO_ACK |
 | Idle | The Target app's 96 px logo (half transparent when the Target is not usable) with the conversation title below it (the label after `" · "`); without a known app, mint rings with a filled core and `VV_H_IDLE` ("ready"). Subtitle `VV_T_IDLE_HINT` ("press OK to speak"), or in amber the most important problem: protocol version mismatch, a Companion STATUS message (speech permission, accessibility permission, Orca CLI, zh-CN recognizer, or the Companion's text for unknown codes), or "Target not running" |
 | Dictating | Coral dot + `VV_H_DICTATING`, elapsed `MM:SS` (turns amber in the last 30 s), a 16-bar live microphone meter, and the latest Partial Text wrapped over up to 6 lines, showing its tail with a leading `…` when it does not fit |
 | Waiting for result | Mint spinner, `VV_H_WAITING` ("recognizing…"), the last two lines of Partial Text |
@@ -154,10 +154,11 @@ A Dictation stops by itself after 5 minutes (sends DICT_STOP as if OK was presse
   characteristics have an `access_cb`.
 - Security: LE Secure Connections only (`CONFIG_BT_NIMBLE_SM_LEGACY=n`,
   `SM_SC_ONLY`), MITM, bonding, DisplayOnly IO capability. On connect the Device
-  requests security. For a new Mac, the Device generates an unbiased random
-  6-digit passkey and shows it; the user types it on the Mac. A link that ends
-  up unencrypted, unauthenticated, unbonded, or with a key shorter than 16 bytes
-  is disconnected and shows the pairing-failed toast.
+  requests security. For a new computer, the Device generates an unbiased
+  random 6-digit passkey and shows it; the user types it in the macOS pairing
+  prompt, or in Voice Notes on Windows. A link that ends up unencrypted,
+  unauthenticated, unbonded, or with a key shorter than 16 bytes is
+  disconnected and shows the pairing-failed toast.
 - Bonds persist in NVS (`CONFIG_BT_NIMBLE_NVS_PERSIST=y`, up to 3). A bonded
   Mac reconnects without a passkey. If the Mac forgot the Device, the Device
   deletes the old bond and pairs again (`REPEAT_PAIRING`). If the Device lost its
@@ -251,6 +252,22 @@ after the UI is built and on link ready.
 ./tools/validate.sh --static    # host tests: vv_adpcm (golden vector), vv_proto/vv_text, vv_app, font coverage
 ./tools/validate.sh --firmware  # ESP-IDF build + merged image build/vibe-voice-input-full.bin
 ```
+
+## Release
+
+```bash
+./tools/release_firmware.sh --dry-run v0.2.0   # build and write the notes only
+./tools/release_firmware.sh v0.2.0
+```
+
+From a clean tree with ESP-IDF activated and `gh` logged in, the script tags
+`HEAD` (so the firmware reports exactly the version), builds through the
+firmware gate, writes `SHA256SUMS.txt` and bilingual notes under
+`build/release/<version>/`, pushes the tag and creates the GitHub Release with
+the merged image. The notes link
+[Voice Notes](https://github.com/SoulZhong/voice-notes/releases/latest), which
+is the computer side. If the protocol version changed, say in the notes which
+Voice Notes version is needed.
 
 ## On-device acceptance checklist
 
